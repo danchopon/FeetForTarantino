@@ -223,8 +223,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 🎬 *Movie Watchlist Bot*
 
 *Команды:*
-`/add название` — добавить фильм в список
-`/watched название` — отметить как просмотренный
+`/add название` — добавить фильм
+`/batch` — добавить несколько фильмов
+`/watched название` — отметить просмотренным
 `/remove название` — удалить фильм
 `/list` — показать все фильмы
 `/random` — случайный фильм
@@ -266,6 +267,63 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"⚠️ *{movie_title}* уже в списке ({status_text})!",
             parse_mode="Markdown"
         )
+
+
+async def batch_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Add multiple movies at once."""
+    text = update.message.text
+    
+    # Remove /batch command from text
+    if text.startswith("/batch"):
+        text = text[6:].strip()
+    
+    if not text:
+        await update.message.reply_text(
+            "📝 Отправь список фильмов, каждый с новой строки:\n\n"
+            "`/batch\n"
+            "Inception\n"
+            "The Matrix\n"
+            "Interstellar`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Split by newlines
+    movies = [m.strip() for m in text.split("\n") if m.strip()]
+    
+    if not movies:
+        await update.message.reply_text("❌ Не найдено фильмов для добавления")
+        return
+    
+    chat_id = update.effective_chat.id
+    added_by = update.effective_user.first_name
+    
+    added = []
+    skipped = []
+    
+    for title in movies:
+        success, _ = add_movie_db(chat_id, title, added_by)
+        if success:
+            added.append(title)
+        else:
+            skipped.append(title)
+    
+    # Build response
+    parts = []
+    if added:
+        parts.append(f"✅ Добавлено ({len(added)}):")
+        for m in added:
+            parts.append(f"  • {m}")
+    
+    if skipped:
+        parts.append(f"\n⚠️ Уже в списке ({len(skipped)}):")
+        for m in skipped:
+            parts.append(f"  • {m}")
+    
+    counts = get_counts_db(chat_id)
+    parts.append(f"\n📋 Всего к просмотру: {counts['to_watch']}")
+    
+    await update.message.reply_text("\n".join(parts))
 
 
 async def mark_watched(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -407,6 +465,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("add", add_movie))
+    application.add_handler(CommandHandler("batch", batch_add))
     application.add_handler(CommandHandler("watched", mark_watched))
     application.add_handler(CommandHandler("remove", remove_movie))
     application.add_handler(CommandHandler("list", list_movies))
