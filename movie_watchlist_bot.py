@@ -48,9 +48,13 @@ def init_db():
             added_by VARCHAR(100),
             added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             watched_by VARCHAR(100),
-            watched_at TIMESTAMP,
-            UNIQUE(chat_id, LOWER(title))
+            watched_at TIMESTAMP
         )
+    """)
+    
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_movies_chat_title 
+        ON movies(chat_id, LOWER(title))
     """)
     
     cur.execute("""
