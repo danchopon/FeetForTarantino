@@ -7,6 +7,7 @@ railway-deploy/
 ├── movie_watchlist_bot.py  # бот
 ├── requirements.txt        # зависимости
 ├── Procfile               # команда запуска
+├── nixpacks.toml          # конфиг сборки
 └── runtime.txt            # версия Python
 ```
 
@@ -16,24 +17,34 @@ railway-deploy/
 
 Залей все файлы из этой папки в новый репозиторий.
 
-### 2. Railway
+### 2. Railway — создай проект
 
 1. Зайди на [railway.app](https://railway.app)
 2. Войди через GitHub
 3. **New Project** → **Deploy from GitHub repo**
 4. Выбери свой репозиторий
 
-### 3. Добавь токен бота
+### 3. Добавь PostgreSQL
 
-1. В Railway открой свой проект
+1. В проекте нажми **+ New** → **Database** → **PostgreSQL**
+2. Railway автоматически добавит `DATABASE_URL`
+
+### 4. Добавь токен бота
+
+1. Кликни на свой сервис (не на PostgreSQL)
 2. Перейди во вкладку **Variables**
 3. Добавь переменную:
    - Name: `TELEGRAM_BOT_TOKEN`
    - Value: `твой_токен_от_BotFather`
 
-### 4. Готово!
+### 5. Свяжи сервисы
 
-Бот автоматически запустится. Логи можно смотреть во вкладке **Deployments**.
+1. В Variables твоего сервиса нажми **+ Add Variable**
+2. Выбери **Add Reference** → `DATABASE_URL` из PostgreSQL
+
+### 6. Готово!
+
+Бот автоматически запустится. Данные теперь хранятся в PostgreSQL и не пропадут при редеплое.
 
 ---
 
@@ -45,11 +56,3 @@ railway-deploy/
 - `/list` — список всех фильмов
 - `/random` — случайный фильм
 - `/poll N` — голосование (N фильмов)
-
----
-
-## Важно
-
-⚠️ Railway Free tier даёт $5/месяц кредитов — этого хватит для бота.
-
-⚠️ Данные хранятся в `movie_data.json`. При редеплое файл сбросится. Для постоянного хранения нужна база данных (могу добавить).
