@@ -441,7 +441,7 @@ async def create_poll(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     chosen = random.sample(to_watch, num)
     options = [movie["title"][:100] for movie in chosen]
 
-    await update.message.send_poll(
+    await update.effective_chat.send_poll(
         question="🎬 Что смотрим?",
         options=options,
         is_anonymous=False,
