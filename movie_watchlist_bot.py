@@ -250,6 +250,34 @@ def mark_watched_by_id(chat_id: int, movie_id: int, watched_by: str) -> tuple[bo
     return True, row["title"]
 
 
+def unwatch_movie_by_id(chat_id: int, movie_id: int) -> tuple[bool, str | None]:
+    """Move a watched movie back to to_watch list."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute("SELECT id, title, status FROM movies WHERE chat_id = %s AND id = %s", (chat_id, movie_id))
+    row = cur.fetchone()
+    
+    if not row:
+        cur.close()
+        conn.close()
+        return False, None
+    
+    if row["status"] != "watched":
+        cur.close()
+        conn.close()
+        return False, row["title"]
+    
+    cur.execute(
+        "UPDATE movies SET status = 'to_watch', watched_by = NULL, watched_at = NULL WHERE id = %s",
+        (row["id"],)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return True, row["title"]
+
+
 def remove_movie_by_id(chat_id: int, movie_id: int) -> str | None:
     conn = get_db_connection()
     cur = conn.cursor()
@@ -511,6 +539,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 `/batch` — добавить несколько
 `/list` — список фильмов
 `/pages` — список с кнопками
+`/wlist` — просмотренные с кнопками
 `/info 5` — инфо о фильме
 `/watched 5` — отметить просмотренным
 `/remove 5` — удалить
@@ -895,6 +924,157 @@ async def movie_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await show_page(query.message, chat_id, 0, edit=True)
 
 
+async def watched_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle watched movies pagination and actions."""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    chat_id = query.message.chat_id
+    
+    if data == "noop":
+        return
+    
+    if data.startswith("wpage_"):
+        page = int(data.replace("wpage_", ""))
+        await show_watched_page(query.message, chat_id, page - 1, edit=True)
+    
+    elif data.startswith("wmovie_"):
+        movie_id = int(data.replace("wmovie_", ""))
+        movie = get_movie_by_id(chat_id, movie_id)
+        
+        if movie and movie["status"] == "watched":
+            await show_watched_movie_detail(query, movie, chat_id)
+        else:
+            await query.answer("Фильм не найден", show_alert=True)
+
+
+async def show_watched_page(message, chat_id: int, page: int, edit: bool = False) -> None:
+    """Show a page of watched movies with buttons."""
+    watched = get_movies_db(chat_id, "watched")
+    
+    if not watched:
+        text = "📭 Просмотренных фильмов пока нет"
+        if edit:
+            await message.edit_text(text)
+        else:
+            await message.reply_text(text)
+        return
+    
+    per_page = 10
+    total_pages = (len(watched) + per_page - 1) // per_page
+    page = max(0, min(page, total_pages - 1))
+    
+    start_idx = page * per_page
+    end_idx = min(start_idx + per_page, len(watched))
+    page_movies = watched[start_idx:end_idx]
+    
+    # Build text
+    parts = [f"✅ *Просмотренные фильмы* (стр. {page + 1}/{total_pages}):\n"]
+    
+    for i, movie in enumerate(page_movies, start_idx + 1):
+        line = f"{i}. {movie['title']}"
+        if movie.get("year"):
+            line += f" ({movie['year']})"
+        if movie.get("rating"):
+            line += f" ⭐{movie['rating']:.1f}"
+        parts.append(line)
+    
+    # Build keyboard
+    keyboard = []
+    
+    # Number buttons
+    row1 = []
+    row2 = []
+    for i, movie in enumerate(page_movies):
+        num = start_idx + i + 1
+        btn = InlineKeyboardButton(str(num), callback_data=f"wmovie_{movie['id']}")
+        if i < 5:
+            row1.append(btn)
+        else:
+            row2.append(btn)
+    
+    if row1:
+        keyboard.append(row1)
+    if row2:
+        keyboard.append(row2)
+    
+    # Navigation row
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("◀️", callback_data=f"wpage_{page + 1}"))
+    
+    nav_row.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="noop"))
+    
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("▶️", callback_data=f"wpage_{page + 2}"))
+    
+    keyboard.append(nav_row)
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if edit:
+        await message.edit_text("\n".join(parts), parse_mode="Markdown", reply_markup=reply_markup)
+    else:
+        await message.reply_text("\n".join(parts), parse_mode="Markdown", reply_markup=reply_markup)
+
+
+async def show_watched_movie_detail(query, movie: dict, chat_id: int) -> None:
+    """Show watched movie detail with action buttons."""
+    parts = [f"🎬 *{movie['title']}*\n"]
+    
+    if movie.get("year"):
+        parts.append(f"📅 Год: {movie['year']}")
+    if movie.get("rating"):
+        parts.append(f"⭐ Рейтинг: {movie['rating']:.1f}")
+    if movie.get("watched_by"):
+        parts.append(f"✅ Смотрел: {movie['watched_by']}")
+    if movie.get("watched_at"):
+        parts.append(f"📆 Когда: {movie['watched_at'].strftime('%d.%m.%Y')}")
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("↩️ Вернуть в список", callback_data=f"unw_{movie['id']}"),
+            InlineKeyboardButton("🗑 Удалить", callback_data=f"wd_{movie['id']}")
+        ],
+        [InlineKeyboardButton("◀️ Назад", callback_data="back_wlist")]
+    ]
+    
+    await query.edit_message_text("\n".join(parts), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def watched_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle unwatch/delete actions from watched movie detail."""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    chat_id = query.message.chat_id
+    
+    if data.startswith("unw_"):
+        movie_id = int(data.replace("unw_", ""))
+        success, title = unwatch_movie_by_id(chat_id, movie_id)
+        
+        if success:
+            await query.answer(f"↩️ {title} возвращён в список!", show_alert=True)
+            await show_watched_page(query.message, chat_id, 0, edit=True)
+        else:
+            await query.answer("Ошибка", show_alert=True)
+    
+    elif data.startswith("wd_"):
+        movie_id = int(data.replace("wd_", ""))
+        title = remove_movie_by_id(chat_id, movie_id)
+        
+        if title:
+            await query.answer(f"🗑 {title} удалён!", show_alert=True)
+            await show_watched_page(query.message, chat_id, 0, edit=True)
+        else:
+            await query.answer("Ошибка", show_alert=True)
+    
+    elif data == "back_wlist":
+        await show_watched_page(query.message, chat_id, 0, edit=True)
+
+
 async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show movie info by number with action buttons."""
     if not context.args:
@@ -1205,6 +1385,96 @@ async def suggest_movies(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text("\n".join(parts), parse_mode="Markdown", reply_markup=reply_markup)
 
 
+async def wlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show watched movies with pagination."""
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    
+    # Parse args
+    show_all = "-a" in args
+    search_query = None
+    page_num = 1
+    
+    if "-s" in args:
+        try:
+            idx = args.index("-s")
+            if idx + 1 < len(args):
+                search_query = " ".join(args[idx + 1:])
+        except ValueError:
+            pass
+    
+    if "-p" in args:
+        try:
+            idx = args.index("-p")
+            if idx + 1 < len(args):
+                page_num = int(args[idx + 1])
+        except (ValueError, IndexError):
+            pass
+    
+    watched = get_movies_db(chat_id, "watched")
+    
+    if not watched:
+        await update.message.reply_text("📭 Просмотренных фильмов пока нет")
+        return
+    
+    # Apply search
+    if search_query:
+        watched = [m for m in watched if search_query.lower() in m["title"].lower()]
+        if not watched:
+            await update.message.reply_text(f"🔍 Не найдено: '{search_query}'")
+            return
+    
+    # Paginate
+    per_page = 50 if show_all else 10
+    total_pages = (len(watched) + per_page - 1) // per_page
+    page_num = max(1, min(page_num, total_pages))
+    
+    start = (page_num - 1) * per_page
+    end = start + per_page
+    page_movies = watched[start:end]
+    
+    # Build message
+    header = "✅ *Просмотренные фильмы*\n"
+    if search_query:
+        header += f"🔍 Поиск: _{search_query}_\n"
+    header += "\n"
+    
+    lines = []
+    for i, movie in enumerate(page_movies, start + 1):
+        line = f"{i}. {movie['title']}"
+        if movie.get("year"):
+            line += f" ({movie['year']})"
+        if movie.get("rating"):
+            line += f" ⭐{movie['rating']:.1f}"
+        lines.append(line)
+    
+    message = header + "\n".join(lines)
+    
+    # Build keyboard
+    keyboard = []
+    
+    # Number buttons (max 5 per row)
+    if len(page_movies) <= 10:
+        num_buttons = [
+            InlineKeyboardButton(str(i), callback_data=f"wmovie_{watched[start + idx]['id']}")
+            for idx, i in enumerate(range(start + 1, start + len(page_movies) + 1))
+        ]
+        for i in range(0, len(num_buttons), 5):
+            keyboard.append(num_buttons[i:i + 5])
+    
+    # Pagination row
+    nav_row = []
+    if page_num > 1:
+        nav_row.append(InlineKeyboardButton("◀️", callback_data=f"wpage_{page_num - 1}"))
+    nav_row.append(InlineKeyboardButton(f"{page_num}/{total_pages}", callback_data="noop"))
+    if page_num < total_pages:
+        nav_row.append(InlineKeyboardButton("▶️", callback_data=f"wpage_{page_num + 1}"))
+    keyboard.append(nav_row)
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(message, reply_markup=reply_markup, parse_mode="Markdown")
+
+
 async def export_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Export movie list to text file."""
     chat_id = update.effective_chat.id
@@ -1444,6 +1714,7 @@ def main() -> None:
     application.add_handler(CommandHandler("remove", remove_movie))
     application.add_handler(CommandHandler("list", list_movies))
     application.add_handler(CommandHandler("pages", pages_command))
+    application.add_handler(CommandHandler("wlist", wlist_command))
     application.add_handler(CommandHandler("info", info_command))
     application.add_handler(CommandHandler("random", random_movie))
     application.add_handler(CommandHandler("poll", create_poll))
@@ -1465,6 +1736,8 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(tmdb_add_callback, pattern=r"^(tmdb_add_|add_manual_)"))
     application.add_handler(CallbackQueryHandler(page_callback, pattern=r"^(page_|movie_|noop)"))
     application.add_handler(CallbackQueryHandler(movie_action_callback, pattern=r"^(w_|d_|back_pages)"))
+    application.add_handler(CallbackQueryHandler(watched_callback, pattern=r"^(wpage_|wmovie_)"))
+    application.add_handler(CallbackQueryHandler(watched_action_callback, pattern=r"^(unw_|wd_|back_wlist)"))
     
     print("🎬 Бот запущен!")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
