@@ -537,9 +537,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 *Основные:*
 `/add название` — добавить фильм
 `/batch` — добавить несколько
-`/list` — список фильмов
+`/list` — пагинация + кнопки
+`/list -a` — только пагинация
+`/list -s Matrix` — поиск
+`/list -ps 25` — размер страницы
 `/pages` — список с кнопками
-`/wlist` — просмотренные с кнопками
+`/wlist` — просмотренные
 `/info 5` — инфо о фильме
 `/watched 5` — отметить просмотренным
 `/remove 5` — удалить
@@ -721,41 +724,113 @@ async def batch_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def list_movies(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Simple list without buttons, 25 per page."""
+    """Paginated list with search and customizable page size."""
     chat_id = update.effective_chat.id
-    movies = get_movies_db(chat_id)
+    args = context.args or []
     
-    to_watch = [m for m in movies if m["status"] == "to_watch"]
-    watched = [m for m in movies if m["status"] == "watched"]
+    # Parse arguments
+    show_all_pages = "-a" in args  # Only pagination buttons, no number buttons
+    search_query = None
+    page_num = 1
+    page_size = 10
     
-    if not movies:
+    # Search term
+    if "-s" in args:
+        try:
+            idx = args.index("-s")
+            if idx + 1 < len(args):
+                # Get all args after -s until next flag
+                search_terms = []
+                for i in range(idx + 1, len(args)):
+                    if args[i].startswith("-"):
+                        break
+                    search_terms.append(args[i])
+                search_query = " ".join(search_terms)
+        except (ValueError, IndexError):
+            pass
+    
+    # Page number
+    if "-p" in args:
+        try:
+            idx = args.index("-p")
+            if idx + 1 < len(args):
+                page_num = int(args[idx + 1])
+        except (ValueError, IndexError):
+            pass
+    
+    # Page size (max 50)
+    if "-ps" in args:
+        try:
+            idx = args.index("-ps")
+            if idx + 1 < len(args):
+                page_size = max(1, min(50, int(args[idx + 1])))
+        except (ValueError, IndexError):
+            pass
+    
+    to_watch = get_movies_db(chat_id, "to_watch")
+    
+    if not to_watch:
         await update.message.reply_text("📭 Список пуст! Добавь фильмы через /add")
         return
     
-    # Build simple list
-    parts = [f"📋 *К просмотру ({len(to_watch)}):*\n"]
+    # Apply search filter
+    if search_query:
+        to_watch = [m for m in to_watch if search_query.lower() in m["title"].lower()]
+        if not to_watch:
+            await update.message.reply_text(f"🔍 Не найдено: '{search_query}'")
+            return
     
-    for i, movie in enumerate(to_watch[:25], 1):
-        parts.append(format_movie(movie, i))
+    # Paginate
+    total_pages = (len(to_watch) + page_size - 1) // page_size
+    page_num = max(1, min(page_num, total_pages))
     
-    if len(to_watch) > 25:
-        parts.append(f"_...и ещё {len(to_watch) - 25}_")
+    start = (page_num - 1) * page_size
+    end = start + page_size
+    page_movies = to_watch[start:end]
     
-    if not to_watch:
-        parts.append("_пусто_")
+    # Build message
+    header = f"📋 *К просмотру* (стр. {page_num}/{total_pages})\n"
+    if search_query:
+        header += f"🔍 Поиск: _{search_query}_\n"
+    header += "\n"
     
-    parts.append(f"\n✅ *Просмотрено ({len(watched)}):*")
-    if watched:
-        for i, movie in enumerate(watched[:10], 1):
-            parts.append(format_movie(movie, i))
-        if len(watched) > 10:
-            parts.append(f"_...и ещё {len(watched) - 10}_")
-    else:
-        parts.append("_пусто_")
+    lines = []
+    for i, movie in enumerate(page_movies, start + 1):
+        lines.append(format_movie(movie, i))
     
-    parts.append(f"\n💡 Используй /pages для навигации с кнопками")
+    message = header + "\n".join(lines)
     
-    await update.message.reply_text("\n".join(parts), parse_mode="Markdown")
+    # Build keyboard
+    keyboard = []
+    
+    # Number buttons (only if not -a flag and page size <= 10)
+    if not show_all_pages and len(page_movies) <= 10:
+        row1 = []
+        row2 = []
+        for i, movie in enumerate(page_movies):
+            num = start + i + 1
+            btn = InlineKeyboardButton(str(num), callback_data=f"movie_{movie['id']}")
+            if i < 5:
+                row1.append(btn)
+            else:
+                row2.append(btn)
+        
+        if row1:
+            keyboard.append(row1)
+        if row2:
+            keyboard.append(row2)
+    
+    # Pagination row
+    nav_row = []
+    if page_num > 1:
+        nav_row.append(InlineKeyboardButton("◀️", callback_data=f"list_{page_num - 1}_{page_size}_{search_query or ''}_{show_all_pages}"))
+    nav_row.append(InlineKeyboardButton(f"{page_num}/{total_pages}", callback_data="noop"))
+    if page_num < total_pages:
+        nav_row.append(InlineKeyboardButton("▶️", callback_data=f"list_{page_num + 1}_{page_size}_{search_query or ''}_{show_all_pages}"))
+    keyboard.append(nav_row)
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(message, reply_markup=reply_markup, parse_mode="Markdown")
 
 
 async def pages_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -856,6 +931,77 @@ async def page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if data.startswith("page_"):
         page = int(data.replace("page_", ""))
         await show_page(query.message, chat_id, page, edit=True)
+    
+    elif data.startswith("list_"):
+        # Format: list_page_size_search_showall
+        parts = data.replace("list_", "").split("_", 3)
+        page = int(parts[0])
+        page_size = int(parts[1])
+        search_query = parts[2] if parts[2] else None
+        show_all = parts[3] == "True" if len(parts) > 3 else False
+        
+        to_watch = get_movies_db(chat_id, "to_watch")
+        
+        # Apply search
+        if search_query:
+            to_watch = [m for m in to_watch if search_query.lower() in m["title"].lower()]
+        
+        if not to_watch:
+            await query.answer("Список пуст", show_alert=True)
+            return
+        
+        # Paginate
+        total_pages = (len(to_watch) + page_size - 1) // page_size
+        page = max(1, min(page, total_pages))
+        
+        start = (page - 1) * page_size
+        end = start + page_size
+        page_movies = to_watch[start:end]
+        
+        # Build message
+        header = f"📋 *К просмотру* (стр. {page}/{total_pages})\n"
+        if search_query:
+            header += f"🔍 Поиск: _{search_query}_\n"
+        header += "\n"
+        
+        lines = [format_movie(m, start + i + 1) for i, m in enumerate(page_movies)]
+        message = header + "\n".join(lines)
+        
+        # Build keyboard
+        keyboard = []
+        
+        # Number buttons (only if not show_all and <= 10)
+        if not show_all and len(page_movies) <= 10:
+            row1 = []
+            row2 = []
+            for i, movie in enumerate(page_movies):
+                num = start + i + 1
+                btn = InlineKeyboardButton(str(num), callback_data=f"movie_{movie['id']}")
+                if i < 5:
+                    row1.append(btn)
+                else:
+                    row2.append(btn)
+            
+            if row1:
+                keyboard.append(row1)
+            if row2:
+                keyboard.append(row2)
+        
+        # Pagination row
+        nav_row = []
+        if page > 1:
+            nav_row.append(InlineKeyboardButton("◀️", callback_data=f"list_{page - 1}_{page_size}_{search_query or ''}_{show_all}"))
+        nav_row.append(InlineKeyboardButton(f"{page}/{total_pages}", callback_data="noop"))
+        if page < total_pages:
+            nav_row.append(InlineKeyboardButton("▶️", callback_data=f"list_{page + 1}_{page_size}_{search_query or ''}_{show_all}"))
+        keyboard.append(nav_row)
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(message, parse_mode="Markdown", reply_markup=reply_markup)
+    
+    elif data.startswith("lpage_"):
+        page = int(data.replace("lpage_", ""))
+        await show_page(query.message, chat_id, page - 1, edit=True)
     
     elif data.startswith("movie_"):
         movie_id = int(data.replace("movie_", ""))
@@ -1734,7 +1880,7 @@ def main() -> None:
     
     # Callbacks
     application.add_handler(CallbackQueryHandler(tmdb_add_callback, pattern=r"^(tmdb_add_|add_manual_)"))
-    application.add_handler(CallbackQueryHandler(page_callback, pattern=r"^(page_|movie_|noop)"))
+    application.add_handler(CallbackQueryHandler(page_callback, pattern=r"^(page_|list_|lpage_|movie_|noop)"))
     application.add_handler(CallbackQueryHandler(movie_action_callback, pattern=r"^(w_|d_|back_pages)"))
     application.add_handler(CallbackQueryHandler(watched_callback, pattern=r"^(wpage_|wmovie_)"))
     application.add_handler(CallbackQueryHandler(watched_action_callback, pattern=r"^(unw_|wd_|back_wlist)"))
