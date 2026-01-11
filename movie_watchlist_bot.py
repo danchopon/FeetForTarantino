@@ -231,12 +231,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 `/random` — случайный фильм
 `/poll N` — голосование из N случайных
 `/vote 1,5,12` — голосование за выбранные
+`/rpoll 1,5,12` — случайный из выбранных
 
 *Примеры:*
 `/add Inception`
 `/watched Inception`
 `/poll 3`
 `/vote 2,5,8`
+`/rpoll 2,5,8`
 """
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
@@ -516,6 +518,61 @@ async def vote_poll(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def random_from_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Pick a random movie from specific numbers."""
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Укажи номера фильмов:\n`/rpoll 1,5,12`\n\nНомера см. в /list",
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Parse numbers
+    input_text = " ".join(context.args)
+    input_text = input_text.replace(",", " ")
+    
+    try:
+        numbers = [int(n.strip()) for n in input_text.split() if n.strip()]
+    except ValueError:
+        await update.message.reply_text("❌ Неверный формат. Пример: `/rpoll 1,5,12`", parse_mode="Markdown")
+        return
+    
+    if not numbers:
+        await update.message.reply_text("❌ Укажи номера фильмов")
+        return
+    
+    chat_id = update.effective_chat.id
+    to_watch = get_movies_db(chat_id, "to_watch")
+    
+    if not to_watch:
+        await update.message.reply_text("📭 Список пуст!")
+        return
+    
+    # Get movies by numbers (1-indexed)
+    selected = []
+    invalid = []
+    
+    for num in numbers:
+        if 1 <= num <= len(to_watch):
+            selected.append(to_watch[num - 1])
+        else:
+            invalid.append(num)
+    
+    if invalid:
+        await update.message.reply_text(
+            f"❌ Неверные номера: {', '.join(map(str, invalid))}\n"
+            f"Доступно: 1-{len(to_watch)}"
+        )
+        return
+    
+    if not selected:
+        await update.message.reply_text("❌ Не найдено фильмов")
+        return
+    
+    chosen = random.choice(selected)
+    await update.message.reply_text(f"🎲 *{chosen['title']}*", parse_mode="Markdown")
+
+
 def main() -> None:
     """Run the bot."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -539,6 +596,7 @@ def main() -> None:
     application.add_handler(CommandHandler("random", random_movie))
     application.add_handler(CommandHandler("poll", create_poll))
     application.add_handler(CommandHandler("vote", vote_poll))
+    application.add_handler(CommandHandler("rpoll", random_from_selection))
 
     print("🎬 Бот запущен!")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
