@@ -229,12 +229,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 `/remove название` — удалить фильм
 `/list` — показать все фильмы
 `/random` — случайный фильм
-`/poll N` — голосование (N = 1-10 фильмов)
+`/poll N` — голосование из N случайных
+`/vote 1,5,12` — голосование за выбранные
 
 *Примеры:*
 `/add Inception`
 `/watched Inception`
 `/poll 3`
+`/vote 2,5,8`
 """
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
@@ -449,6 +451,71 @@ async def create_poll(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
+async def vote_poll(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Create a poll with specific movies by their numbers."""
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Укажи номера фильмов:\n`/vote 1,5,12`\n\nНомера см. в /list",
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Parse numbers from input like "1,5,12" or "1, 5, 12" or "1 5 12"
+    input_text = " ".join(context.args)
+    input_text = input_text.replace(",", " ")
+    
+    try:
+        numbers = [int(n.strip()) for n in input_text.split() if n.strip()]
+    except ValueError:
+        await update.message.reply_text("❌ Неверный формат. Пример: `/vote 1,5,12`", parse_mode="Markdown")
+        return
+    
+    if len(numbers) < 2:
+        await update.message.reply_text("❌ Нужно минимум 2 фильма для голосования")
+        return
+    
+    if len(numbers) > 10:
+        await update.message.reply_text("❌ Максимум 10 фильмов в опросе")
+        return
+    
+    chat_id = update.effective_chat.id
+    to_watch = get_movies_db(chat_id, "to_watch")
+    
+    if not to_watch:
+        await update.message.reply_text("📭 Список пуст!")
+        return
+    
+    # Get movies by numbers (1-indexed)
+    selected = []
+    invalid = []
+    
+    for num in numbers:
+        if 1 <= num <= len(to_watch):
+            selected.append(to_watch[num - 1])
+        else:
+            invalid.append(num)
+    
+    if invalid:
+        await update.message.reply_text(
+            f"❌ Неверные номера: {', '.join(map(str, invalid))}\n"
+            f"Доступно: 1-{len(to_watch)}"
+        )
+        return
+    
+    if len(selected) < 2:
+        await update.message.reply_text("❌ Нужно минимум 2 фильма для голосования")
+        return
+    
+    options = [movie["title"][:100] for movie in selected]
+    
+    await update.effective_chat.send_poll(
+        question="🎬 Что смотрим?",
+        options=options,
+        is_anonymous=False,
+        allows_multiple_answers=False,
+    )
+
+
 def main() -> None:
     """Run the bot."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -471,6 +538,7 @@ def main() -> None:
     application.add_handler(CommandHandler("list", list_movies))
     application.add_handler(CommandHandler("random", random_movie))
     application.add_handler(CommandHandler("poll", create_poll))
+    application.add_handler(CommandHandler("vote", vote_poll))
 
     print("🎬 Бот запущен!")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
