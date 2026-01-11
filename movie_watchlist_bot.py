@@ -62,6 +62,23 @@ def init_db():
         ON movies(chat_id, status)
     """)
     
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS vote_basket (
+            id SERIAL PRIMARY KEY,
+            chat_id BIGINT NOT NULL,
+            user_id BIGINT NOT NULL,
+            user_name VARCHAR(100),
+            movie_num INT NOT NULL,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(chat_id, user_id, movie_num)
+        )
+    """)
+    
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_vote_basket_chat 
+        ON vote_basket(chat_id)
+    """)
+    
     conn.commit()
     cur.close()
     conn.close()
@@ -215,6 +232,119 @@ def get_counts_db(chat_id: int) -> dict:
     return counts
 
 
+# === Vote Basket Functions ===
+
+def add_to_basket(chat_id: int, user_id: int, user_name: str, movie_nums: list[int]) -> tuple[list[int], list[int]]:
+    """Add movies to user's basket. Returns (added, already_exists)."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    added = []
+    exists = []
+    
+    for num in movie_nums:
+        try:
+            cur.execute(
+                """INSERT INTO vote_basket (chat_id, user_id, user_name, movie_num)
+                   VALUES (%s, %s, %s, %s)""",
+                (chat_id, user_id, user_name, num)
+            )
+            added.append(num)
+        except psycopg2.errors.UniqueViolation:
+            conn.rollback()
+            exists.append(num)
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    return added, exists
+
+
+def remove_from_basket(chat_id: int, user_id: int, movie_nums: list[int] | None = None) -> int:
+    """Remove movies from user's basket. If movie_nums is None, clear all. Returns count removed."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    if movie_nums is None:
+        cur.execute(
+            "DELETE FROM vote_basket WHERE chat_id = %s AND user_id = %s",
+            (chat_id, user_id)
+        )
+    else:
+        cur.execute(
+            "DELETE FROM vote_basket WHERE chat_id = %s AND user_id = %s AND movie_num = ANY(%s)",
+            (chat_id, user_id, movie_nums)
+        )
+    
+    count = cur.rowcount
+    conn.commit()
+    cur.close()
+    conn.close()
+    return count
+
+
+def clear_basket(chat_id: int) -> int:
+    """Clear entire basket for chat. Returns count removed."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute("DELETE FROM vote_basket WHERE chat_id = %s", (chat_id,))
+    count = cur.rowcount
+    conn.commit()
+    cur.close()
+    conn.close()
+    return count
+
+
+def get_user_basket(chat_id: int, user_id: int) -> list[int]:
+    """Get user's basket movie numbers."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute(
+        "SELECT movie_num FROM vote_basket WHERE chat_id = %s AND user_id = %s ORDER BY movie_num",
+        (chat_id, user_id)
+    )
+    
+    nums = [row["movie_num"] for row in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return nums
+
+
+def get_full_basket(chat_id: int) -> list[dict]:
+    """Get full basket with user info."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute(
+        """SELECT user_id, user_name, movie_num 
+           FROM vote_basket WHERE chat_id = %s ORDER BY user_name, movie_num""",
+        (chat_id,)
+    )
+    
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+def get_unique_basket_movies(chat_id: int) -> list[int]:
+    """Get unique movie numbers from basket."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute(
+        "SELECT DISTINCT movie_num FROM vote_basket WHERE chat_id = %s ORDER BY movie_num",
+        (chat_id,)
+    )
+    
+    nums = [row["movie_num"] for row in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return nums
+
+
 # === Bot Commands ===
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -222,23 +352,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     welcome_text = """
 🎬 *Movie Watchlist Bot*
 
-*Команды:*
+*Основные:*
 `/add название` — добавить фильм
-`/batch` — добавить несколько фильмов
-`/watched название` — отметить просмотренным
-`/remove название` — удалить фильм
-`/list` — показать все фильмы
-`/random` — случайный фильм
-`/poll N` — голосование из N случайных
-`/vote 1,5,12` — голосование за выбранные
-`/rpoll 1,5,12` — случайный из выбранных
+`/batch` — добавить несколько
+`/watched название` — просмотрен
+`/remove название` — удалить
+`/list` — все фильмы
 
-*Примеры:*
-`/add Inception`
-`/watched Inception`
-`/poll 3`
-`/vote 2,5,8`
-`/rpoll 2,5,8`
+*Рандом и голосование:*
+`/random` — случайный фильм
+`/poll N` — poll из N случайных
+`/vote 1,5,12` — poll за выбранные
+`/rpoll 1,5,12` — рандом из выбранных
+
+*Корзина голосования:*
+`/v+ 1,5,12` — добавить в корзину
+`/v-` — очистить свою корзину
+`/v- 5` — убрать фильм из корзины
+`/vmy` — моя корзина
+`/vlist` — общая корзина
+`/go` — запустить poll
+`/vc` — очистить всю корзину
 """
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
@@ -573,6 +707,199 @@ async def random_from_selection(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text(f"🎲 *{chosen['title']}*", parse_mode="Markdown")
 
 
+# === Vote Basket Commands ===
+
+async def basket_add_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Add movies to user's basket. Handles /v+ command."""
+    text = update.message.text
+    # Remove /v+ prefix
+    input_text = text[3:].strip() if text.startswith("/v+") else ""
+    
+    if not input_text:
+        await update.message.reply_text(
+            "❌ Укажи номера:\n`/v+ 1,5,12`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    input_text = input_text.replace(",", " ")
+    
+    try:
+        numbers = [int(n.strip()) for n in input_text.split() if n.strip()]
+    except ValueError:
+        await update.message.reply_text("❌ Неверный формат")
+        return
+    
+    if not numbers:
+        return
+    
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    user_name = update.effective_user.first_name
+    
+    # Validate numbers against movie list
+    to_watch = get_movies_db(chat_id, "to_watch")
+    valid = []
+    invalid = []
+    
+    for num in numbers:
+        if 1 <= num <= len(to_watch):
+            valid.append(num)
+        else:
+            invalid.append(num)
+    
+    if invalid:
+        await update.message.reply_text(
+            f"❌ Неверные номера: {', '.join(map(str, invalid))}\n"
+            f"Доступно: 1-{len(to_watch)}"
+        )
+        return
+    
+    added, exists = add_to_basket(chat_id, user_id, user_name, valid)
+    
+    parts = []
+    if added:
+        movie_titles = [to_watch[n-1]["title"] for n in added]
+        parts.append(f"✅ Добавлено: {', '.join(movie_titles)}")
+    if exists:
+        parts.append(f"⚠️ Уже в корзине: {', '.join(map(str, exists))}")
+    
+    await update.message.reply_text("\n".join(parts))
+
+
+async def basket_remove_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Remove movies from user's basket. Handles /v- command."""
+    text = update.message.text
+    # Remove /v- prefix
+    input_text = text[3:].strip() if text.startswith("/v-") else ""
+    
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    if not input_text:
+        # Clear all
+        count = remove_from_basket(chat_id, user_id)
+        await update.message.reply_text(f"🗑️ Корзина очищена ({count})")
+        return
+    
+    input_text = input_text.replace(",", " ")
+    
+    try:
+        numbers = [int(n.strip()) for n in input_text.split() if n.strip()]
+    except ValueError:
+        await update.message.reply_text("❌ Неверный формат")
+        return
+    
+    count = remove_from_basket(chat_id, user_id, numbers)
+    await update.message.reply_text(f"🗑️ Удалено: {count}")
+
+
+async def basket_my(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show user's basket."""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    nums = get_user_basket(chat_id, user_id)
+    
+    if not nums:
+        await update.message.reply_text("📭 Твоя корзина пуста")
+        return
+    
+    to_watch = get_movies_db(chat_id, "to_watch")
+    
+    parts = ["🛒 *Твоя корзина:*\n"]
+    for num in nums:
+        if 1 <= num <= len(to_watch):
+            parts.append(f"{num}. {to_watch[num-1]['title']}")
+        else:
+            parts.append(f"{num}. _(фильм удалён)_")
+    
+    await update.message.reply_text("\n".join(parts), parse_mode="Markdown")
+
+
+async def basket_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show full basket for chat."""
+    chat_id = update.effective_chat.id
+    
+    basket = get_full_basket(chat_id)
+    
+    if not basket:
+        await update.message.reply_text("📭 Корзина пуста")
+        return
+    
+    to_watch = get_movies_db(chat_id, "to_watch")
+    
+    # Group by user
+    by_user = {}
+    for item in basket:
+        name = item["user_name"]
+        if name not in by_user:
+            by_user[name] = []
+        by_user[name].append(item["movie_num"])
+    
+    parts = ["🛒 *Общая корзина:*\n"]
+    for user_name, nums in by_user.items():
+        movies = []
+        for num in nums:
+            if 1 <= num <= len(to_watch):
+                movies.append(f"{num}. {to_watch[num-1]['title']}")
+        if movies:
+            parts.append(f"*{user_name}:*")
+            parts.extend(movies)
+            parts.append("")
+    
+    # Show unique count
+    unique = get_unique_basket_movies(chat_id)
+    parts.append(f"📊 Уникальных фильмов: {len(unique)}")
+    
+    await update.message.reply_text("\n".join(parts), parse_mode="Markdown")
+
+
+async def basket_go(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Start poll from basket."""
+    chat_id = update.effective_chat.id
+    
+    unique_nums = get_unique_basket_movies(chat_id)
+    
+    if not unique_nums:
+        await update.message.reply_text("📭 Корзина пуста! Добавь фильмы через /v+")
+        return
+    
+    if len(unique_nums) < 2:
+        await update.message.reply_text("❌ Нужно минимум 2 фильма для голосования")
+        return
+    
+    if len(unique_nums) > 10:
+        await update.message.reply_text(f"❌ Максимум 10 фильмов. Сейчас: {len(unique_nums)}")
+        return
+    
+    to_watch = get_movies_db(chat_id, "to_watch")
+    
+    # Get movie titles
+    options = []
+    for num in unique_nums:
+        if 1 <= num <= len(to_watch):
+            options.append(to_watch[num-1]["title"][:100])
+    
+    if len(options) < 2:
+        await update.message.reply_text("❌ Недостаточно валидных фильмов")
+        return
+    
+    await update.effective_chat.send_poll(
+        question="🎬 Что смотрим?",
+        options=options,
+        is_anonymous=False,
+        allows_multiple_answers=False,
+    )
+
+
+async def basket_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear entire basket."""
+    chat_id = update.effective_chat.id
+    count = clear_basket(chat_id)
+    await update.message.reply_text(f"🗑️ Корзина очищена ({count})")
+
+
 def main() -> None:
     """Run the bot."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -597,6 +924,14 @@ def main() -> None:
     application.add_handler(CommandHandler("poll", create_poll))
     application.add_handler(CommandHandler("vote", vote_poll))
     application.add_handler(CommandHandler("rpoll", random_from_selection))
+    
+    # Vote basket commands
+    application.add_handler(MessageHandler(filters.Regex(r'^/v\+'), basket_add_handler))
+    application.add_handler(MessageHandler(filters.Regex(r'^/v-'), basket_remove_handler))
+    application.add_handler(CommandHandler("vmy", basket_my))
+    application.add_handler(CommandHandler("vlist", basket_list))
+    application.add_handler(CommandHandler("go", basket_go))
+    application.add_handler(CommandHandler("vc", basket_clear))
 
     print("🎬 Бот запущен!")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
