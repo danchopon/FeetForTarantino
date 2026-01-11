@@ -374,6 +374,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 `/vmy` — моя корзина
 `/vlist` — общая корзина
 `/go` — запустить poll
+`/vrand` — случайный из корзины
 `/vc` — очистить всю корзину
 """
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
@@ -895,6 +896,31 @@ async def basket_go(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def basket_random(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Pick random movie from basket."""
+    chat_id = update.effective_chat.id
+    
+    unique_nums = get_unique_basket_movies(chat_id)
+    
+    if not unique_nums:
+        await update.message.reply_text("📭 Корзина пуста!")
+        return
+    
+    to_watch = get_movies_db(chat_id, "to_watch")
+    
+    # Filter valid movies
+    valid = [num for num in unique_nums if 1 <= num <= len(to_watch)]
+    
+    if not valid:
+        await update.message.reply_text("❌ Нет валидных фильмов в корзине")
+        return
+    
+    chosen_num = random.choice(valid)
+    chosen = to_watch[chosen_num - 1]
+    
+    await update.message.reply_text(f"🎲 *{chosen['title']}*", parse_mode="Markdown")
+
+
 async def basket_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Clear entire basket."""
     chat_id = update.effective_chat.id
@@ -933,6 +959,7 @@ def main() -> None:
     application.add_handler(CommandHandler("vmy", basket_my))
     application.add_handler(CommandHandler("vlist", basket_list))
     application.add_handler(CommandHandler("go", basket_go))
+    application.add_handler(CommandHandler("vrand", basket_random))
     application.add_handler(CommandHandler("vc", basket_clear))
 
     print("🎬 Бот запущен!")
