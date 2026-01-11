@@ -564,7 +564,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 *Дополнительно:*
 `/suggest` — рекомендации
-`/export` — экспорт списка
+`/export` — экспорт .txt
+`/export -csv` — экспорт .csv
 """
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
@@ -1668,8 +1669,13 @@ async def wlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def export_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Export movie list to text file."""
+    """Export movie list to text or CSV file."""
     chat_id = update.effective_chat.id
+    args = context.args or []
+    
+    # Check if CSV format requested
+    export_csv = "-csv" in args or "csv" in args
+    
     movies = get_movies_db(chat_id)
     
     if not movies:
@@ -1679,33 +1685,80 @@ async def export_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     to_watch = [m for m in movies if m["status"] == "to_watch"]
     watched = [m for m in movies if m["status"] == "watched"]
     
-    lines = ["MOVIE WATCHLIST", "=" * 40, "", "TO WATCH:", "-" * 20]
+    if export_csv:
+        # CSV format
+        import csv
+        from io import StringIO
+        
+        output = StringIO()
+        writer = csv.writer(output)
+        
+        # Header
+        writer.writerow(["Status", "Title", "Year", "Rating", "TMDB ID", "Genres", "Added By", "Added At", "Watched By", "Watched At"])
+        
+        # To watch movies
+        for movie in to_watch:
+            writer.writerow([
+                "To Watch",
+                movie["title"],
+                movie.get("year") or "",
+                movie.get("rating") or "",
+                movie.get("tmdb_id") or "",
+                movie.get("genres") or "",
+                movie.get("added_by") or "",
+                movie.get("added_at").strftime("%Y-%m-%d %H:%M:%S") if movie.get("added_at") else "",
+                "",
+                ""
+            ])
+        
+        # Watched movies
+        for movie in watched:
+            writer.writerow([
+                "Watched",
+                movie["title"],
+                movie.get("year") or "",
+                movie.get("rating") or "",
+                movie.get("tmdb_id") or "",
+                movie.get("genres") or "",
+                movie.get("added_by") or "",
+                movie.get("added_at").strftime("%Y-%m-%d %H:%M:%S") if movie.get("added_at") else "",
+                movie.get("watched_by") or "",
+                movie.get("watched_at").strftime("%Y-%m-%d %H:%M:%S") if movie.get("watched_at") else ""
+            ])
+        
+        content = output.getvalue()
+        file = BytesIO(content.encode("utf-8"))
+        file.name = "watchlist.csv"
+        
+        await update.message.reply_document(file, caption=f"📊 Экспорт: {len(to_watch)} к просмотру, {len(watched)} просмотрено")
     
-    for i, movie in enumerate(to_watch, 1):
-        line = f"{i}. {movie['title']}"
-        if movie.get("year"):
-            line += f" ({movie['year']})"
-        if movie.get("rating"):
-            line += f" ⭐{movie['rating']:.1f}"
-        lines.append(line)
-    
-    lines.extend(["", "WATCHED:", "-" * 20])
-    
-    for i, movie in enumerate(watched, 1):
-        line = f"{i}. {movie['title']}"
-        if movie.get("year"):
-            line += f" ({movie['year']})"
-        lines.append(line)
-    
-    lines.extend(["", "=" * 40, f"Total: {len(to_watch)} to watch, {len(watched)} watched"])
-    
-    content = "\n".join(lines)
-    
-    # Send as file
-    file = BytesIO(content.encode("utf-8"))
-    file.name = "watchlist.txt"
-    
-    await update.message.reply_document(file, caption="📄 Твой список фильмов")
+    else:
+        # Text format
+        lines = ["MOVIE WATCHLIST", "=" * 40, "", "TO WATCH:", "-" * 20]
+        
+        for i, movie in enumerate(to_watch, 1):
+            line = f"{i}. {movie['title']}"
+            if movie.get("year"):
+                line += f" ({movie['year']})"
+            if movie.get("rating"):
+                line += f" ⭐{movie['rating']:.1f}"
+            lines.append(line)
+        
+        lines.extend(["", "WATCHED:", "-" * 20])
+        
+        for i, movie in enumerate(watched, 1):
+            line = f"{i}. {movie['title']}"
+            if movie.get("year"):
+                line += f" ({movie['year']})"
+            lines.append(line)
+        
+        lines.extend(["", "=" * 40, f"Total: {len(to_watch)} to watch, {len(watched)} watched"])
+        
+        content = "\n".join(lines)
+        file = BytesIO(content.encode("utf-8"))
+        file.name = "watchlist.txt"
+        
+        await update.message.reply_document(file, caption="📄 Твой список фильмов")
 
 
 # ============== VOTE BASKET COMMANDS ==============
