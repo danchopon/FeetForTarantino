@@ -535,8 +535,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 🎬 *Movie Watchlist Bot*
 
 *Основные:*
-`/add название` — добавить фильм
-`/batch` — добавить несколько
+`/add название` — один фильм + TMDB
+`/add` + список — несколько без TMDB
 `/list` — пагинация + кнопки
 `/list -a` — только пагинация
 `/list -s Matrix` — поиск
@@ -574,15 +574,62 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Add movie with TMDB search."""
-    if not context.args:
-        await update.message.reply_text("❌ Укажи название:\n`/add Inception`", parse_mode="Markdown")
+    """Add movie(s) - single with TMDB search or multiple directly."""
+    text = update.message.text
+    
+    if text.startswith("/add"):
+        text = text[4:].strip()
+    
+    if not text:
+        await update.message.reply_text(
+            "❌ Укажи название:\n`/add Inception` - с поиском TMDB\n\n"
+            "Или несколько фильмов:\n`/add\nInception\nThe Matrix\nInterstellar`",
+            parse_mode="Markdown"
+        )
         return
     
-    query = " ".join(context.args).strip()
     chat_id = update.effective_chat.id
+    added_by = update.effective_user.first_name
     
-    # Search TMDB
+    # Check if multi-line (batch mode)
+    if "\n" in text:
+        movies = [m.strip() for m in text.split("\n") if m.strip()]
+        
+        if not movies:
+            await update.message.reply_text("❌ Не найдено фильмов")
+            return
+        
+        # Batch add without TMDB
+        added = []
+        skipped = []
+        
+        for title in movies:
+            success, _ = add_movie_db(chat_id, title, added_by)
+            if success:
+                added.append(title)
+            else:
+                skipped.append(title)
+        
+        parts = []
+        if added:
+            parts.append(f"✅ Добавлено ({len(added)}):")
+            for m in added[:10]:
+                parts.append(f"  • {m}")
+            if len(added) > 10:
+                parts.append(f"  ...и ещё {len(added) - 10}")
+        
+        if skipped:
+            parts.append(f"\n⚠️ Уже в списке ({len(skipped)})")
+        
+        counts = get_counts_db(chat_id)
+        parts.append(f"\n📋 Всего к просмотру: {counts['to_watch']}")
+        
+        await update.message.reply_text("\n".join(parts))
+        return
+    
+    # Single movie - search TMDB
+    query = text.strip()
+    
     if TMDB_API_KEY:
         results = await tmdb_search(query)
         
@@ -614,7 +661,6 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
     
     # No TMDB or no results - add directly
-    added_by = update.effective_user.first_name
     success, status = add_movie_db(chat_id, query, added_by)
     
     if success:
@@ -1855,7 +1901,6 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("add", add_movie))
-    application.add_handler(CommandHandler("batch", batch_add))
     application.add_handler(CommandHandler("watched", mark_watched))
     application.add_handler(CommandHandler("remove", remove_movie))
     application.add_handler(CommandHandler("list", list_movies))
