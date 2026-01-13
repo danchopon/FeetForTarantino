@@ -112,20 +112,24 @@ def init_db():
 
 # ============== TMDB API ==============
 
-async def tmdb_search(query: str) -> list[dict]:
-    """Search TMDB for movies."""
+async def tmdb_search(query: str, page: int = 1) -> dict:
+    """Search TMDB for movies with pagination."""
     if not TMDB_API_KEY:
-        return []
+        return {"results": [], "total_pages": 0, "page": 1}
     
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{TMDB_BASE_URL}/search/movie",
-            params={"api_key": TMDB_API_KEY, "query": query, "language": "ru-RU"}
+            params={"api_key": TMDB_API_KEY, "query": query, "language": "ru-RU", "page": page}
         )
         if resp.status_code == 200:
             data = resp.json()
-            return data.get("results", [])[:5]
-    return []
+            return {
+                "results": data.get("results", []),
+                "total_pages": min(data.get("total_pages", 0), 10),  # Limit to 10 pages max
+                "page": data.get("page", 1)
+            }
+    return {"results": [], "total_pages": 0, "page": 1}
 
 
 async def tmdb_get_movie(tmdb_id: int) -> dict | None:
@@ -686,14 +690,104 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = text.strip()
     
     if TMDB_API_KEY:
-        results = await tmdb_search(query)
+        search_data = await tmdb_search(query, page=1)
+        results = search_data.get("results", [])
         
         if results:
-            # Show search results with buttons
+            # Store search data for pagination
+            context.user_data["tmdb_search_query"] = query
+            context.user_data["tmdb_search_mode"] = "add"
+            context.user_data["tmdb_search_chat_id"] = chat_id
+            
+            await show_tmdb_results(update.message, context, search_data, query, mode="add")
+            return
+    
+    # No TMDB or no results - add directly
+    success, status = add_movie_db(chat_id, query, added_by)
+    
+    if success:
+        counts = get_counts_db(chat_id)
+        await update.message.reply_text(f"✅ *{query}* добавлен\n📋 К просмотру: {counts['to_watch']}", parse_mode="Markdown")
+    else:
+        await update.message.reply_text(f"⚠️ *{query}* уже в списке!", parse_mode="Markdown")
+
+
+async def show_tmdb_results(message, context: ContextTypes.DEFAULT_TYPE, search_data: dict, query: str, mode: str = "add") -> None:
+    """Show TMDB search results with pagination."""
+    results = search_data.get("results", [])[:5]  # 5 per page
+    page = search_data.get("page", 1)
+    total_pages = search_data.get("total_pages", 1)
+    
+    # Build keyboard
+    keyboard = []
+    context.user_data["tmdb_results"] = {}
+    
+    for i, movie in enumerate(results):
+        year = movie.get("release_date", "")[:4]
+        rating = movie.get("vote_average", 0)
+        title = movie.get("title", "Unknown")
+        
+        btn_text = f"{title}"
+        if year:
+            btn_text += f" ({year})"
+        if rating:
+            btn_text += f" ⭐{rating:.1f}"
+        
+        callback_data = f"tmdb_add_{movie['id']}"
+        context.user_data["tmdb_results"][str(movie['id'])] = movie
+        keyboard.append([InlineKeyboardButton(btn_text, callback_data=callback_data)])
+    
+    # Pagination row
+    if total_pages > 1:
+        nav_row = []
+        if page > 1:
+            nav_row.append(InlineKeyboardButton("◀️ Пред", callback_data=f"tmdb_page_{page - 1}"))
+        nav_row.append(InlineKeyboardButton(f"{page}/{total_pages}", callback_data="noop"))
+        if page < total_pages:
+            nav_row.append(InlineKeyboardButton("След ▶️", callback_data=f"tmdb_page_{page + 1}"))
+        keyboard.append(nav_row)
+    
+    # Add manual option
+    keyboard.append([InlineKeyboardButton(f"➕ Добавить как \"{query}\"", callback_data=f"add_manual_{query[:50]}")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    header = "🔍 Найдено в TMDB"
+    if total_pages > 1:
+        header += f" (стр. {page}/{total_pages})"
+    header += ":"
+    
+    await message.reply_text(header, reply_markup=reply_markup)
+
+
+async def tmdb_add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle TMDB movie selection and pagination."""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    chat_id = query.message.chat_id
+    added_by = query.from_user.first_name
+    
+    if data.startswith("tmdb_page_"):
+        # Handle pagination
+        page = int(data.replace("tmdb_page_", ""))
+        search_query = context.user_data.get("tmdb_search_query")
+        mode = context.user_data.get("tmdb_search_mode", "add")
+        
+        if search_query:
+            search_data = await tmdb_search(search_query, page=page)
+            
+            # Update message with new page
+            results = search_data.get("results", [])[:5]
+            page_num = search_data.get("page", 1)
+            total_pages = search_data.get("total_pages", 1)
+            
+            # Build keyboard
             keyboard = []
             context.user_data["tmdb_results"] = {}
             
-            for i, movie in enumerate(results[:5]):
+            for movie in results:
                 year = movie.get("release_date", "")[:4]
                 rating = movie.get("vote_average", 0)
                 title = movie.get("title", "Unknown")
@@ -708,31 +802,28 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 context.user_data["tmdb_results"][str(movie['id'])] = movie
                 keyboard.append([InlineKeyboardButton(btn_text, callback_data=callback_data)])
             
+            # Pagination row
+            if total_pages > 1:
+                nav_row = []
+                if page_num > 1:
+                    nav_row.append(InlineKeyboardButton("◀️ Пред", callback_data=f"tmdb_page_{page_num - 1}"))
+                nav_row.append(InlineKeyboardButton(f"{page_num}/{total_pages}", callback_data="noop"))
+                if page_num < total_pages:
+                    nav_row.append(InlineKeyboardButton("След ▶️", callback_data=f"tmdb_page_{page_num + 1}"))
+                keyboard.append(nav_row)
+            
             # Add manual option
-            keyboard.append([InlineKeyboardButton(f"➕ Добавить как \"{query}\"", callback_data=f"add_manual_{query[:50]}")])
+            keyboard.append([InlineKeyboardButton(f"➕ Добавить как \"{search_query}\"", callback_data=f"add_manual_{search_query[:50]}")])
             
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text("🔍 Найдено в TMDB:", reply_markup=reply_markup)
-            return
-    
-    # No TMDB or no results - add directly
-    success, status = add_movie_db(chat_id, query, added_by)
-    
-    if success:
-        counts = get_counts_db(chat_id)
-        await update.message.reply_text(f"✅ *{query}* добавлен\n📋 К просмотру: {counts['to_watch']}", parse_mode="Markdown")
-    else:
-        await update.message.reply_text(f"⚠️ *{query}* уже в списке!", parse_mode="Markdown")
-
-
-async def tmdb_add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle TMDB movie selection."""
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data
-    chat_id = query.message.chat_id
-    added_by = query.from_user.first_name
+            
+            header = "🔍 Найдено в TMDB"
+            if total_pages > 1:
+                header += f" (стр. {page_num}/{total_pages})"
+            header += ":"
+            
+            await query.edit_message_text(header, reply_markup=reply_markup)
+        return
     
     if data.startswith("tmdb_add_"):
         tmdb_id = data.replace("tmdb_add_", "")
@@ -1929,7 +2020,8 @@ async def show_sync_movie(message, context: ContextTypes.DEFAULT_TYPE, index: in
         await message.reply_text("❌ TMDB API не настроен")
         return
     
-    results = await tmdb_search(movie["title"])
+    search_data = await tmdb_search(movie["title"], page=1)
+    results = search_data.get("results", [])
     
     if not results:
         # No results - show skip/stop
@@ -1947,11 +2039,26 @@ async def show_sync_movie(message, context: ContextTypes.DEFAULT_TYPE, index: in
         )
         return
     
+    # Store sync search data
+    context.user_data["tmdb_search_query"] = movie["title"]
+    context.user_data["tmdb_search_mode"] = "sync"
+    context.user_data["sync_current_movie_id"] = movie["id"]
+    
+    # Show results with pagination
+    await show_sync_tmdb_results(message, context, search_data, index, progress)
+
+
+async def show_sync_tmdb_results(message, context: ContextTypes.DEFAULT_TYPE, search_data: dict, sync_index: int, progress: str) -> None:
+    """Show TMDB search results for sync with pagination."""
+    results = search_data.get("results", [])[:5]
+    page = search_data.get("page", 1)
+    total_pages = search_data.get("total_pages", 1)
+    
     # Show search results
     keyboard = []
     context.user_data["sync_tmdb_results"] = {}
     
-    for i, tmdb_movie in enumerate(results[:5]):
+    for tmdb_movie in results:
         year = tmdb_movie.get("release_date", "")[:4]
         rating = tmdb_movie.get("vote_average", 0)
         title = tmdb_movie.get("title", "Unknown")
@@ -1962,22 +2069,38 @@ async def show_sync_movie(message, context: ContextTypes.DEFAULT_TYPE, index: in
         if rating:
             btn_text += f" ⭐{rating:.1f}"
         
-        callback_data = f"sync_select_{index}_{tmdb_movie['id']}"
+        callback_data = f"sync_select_{sync_index}_{tmdb_movie['id']}"
         context.user_data["sync_tmdb_results"][str(tmdb_movie['id'])] = tmdb_movie
         keyboard.append([InlineKeyboardButton(btn_text, callback_data=callback_data)])
     
+    # Pagination row for sync
+    if total_pages > 1:
+        nav_row = []
+        if page > 1:
+            nav_row.append(InlineKeyboardButton("◀️ Пред", callback_data=f"sync_page_{page - 1}"))
+        nav_row.append(InlineKeyboardButton(f"{page}/{total_pages}", callback_data="noop"))
+        if page < total_pages:
+            nav_row.append(InlineKeyboardButton("След ▶️", callback_data=f"sync_page_{page + 1}"))
+        keyboard.append(nav_row)
+    
     # Action buttons
     keyboard.append([
-        InlineKeyboardButton("⏭ Пропустить", callback_data=f"sync_skip_{index}"),
+        InlineKeyboardButton("⏭ Пропустить", callback_data=f"sync_skip_{sync_index}"),
         InlineKeyboardButton("❌ Стоп", callback_data="sync_stop")
     ])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
+    movies_to_sync = context.user_data.get("sync_movies", [])
+    movie = movies_to_sync[sync_index]
+    
+    header = f"🔍 Синхронизация ({progress})\n\n*{movie['title']}*\n\nНайдено в TMDB"
+    if total_pages > 1:
+        header += f" (стр. {page}/{total_pages})"
+    header += ":"
+    
     await message.reply_text(
-        f"🔍 Синхронизация ({progress})\n\n"
-        f"*{movie['title']}*\n\n"
-        f"Найдено в TMDB:",
+        header,
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
@@ -1990,6 +2113,67 @@ async def sync_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     data = query.data
     chat_id = context.user_data.get("sync_chat_id")
+    
+    if data.startswith("sync_page_"):
+        # Handle pagination in sync
+        page = int(data.replace("sync_page_", ""))
+        search_query = context.user_data.get("tmdb_search_query")
+        sync_index = context.user_data.get("sync_index", 0)
+        
+        if search_query:
+            search_data = await tmdb_search(search_query, page=page)
+            movies_to_sync = context.user_data.get("sync_movies", [])
+            progress = f"{sync_index + 1}/{len(movies_to_sync)}"
+            
+            # Update results
+            results = search_data.get("results", [])[:5]
+            page_num = search_data.get("page", 1)
+            total_pages = search_data.get("total_pages", 1)
+            
+            keyboard = []
+            context.user_data["sync_tmdb_results"] = {}
+            
+            for tmdb_movie in results:
+                year = tmdb_movie.get("release_date", "")[:4]
+                rating = tmdb_movie.get("vote_average", 0)
+                title = tmdb_movie.get("title", "Unknown")
+                
+                btn_text = f"{title}"
+                if year:
+                    btn_text += f" ({year})"
+                if rating:
+                    btn_text += f" ⭐{rating:.1f}"
+                
+                callback_data = f"sync_select_{sync_index}_{tmdb_movie['id']}"
+                context.user_data["sync_tmdb_results"][str(tmdb_movie['id'])] = tmdb_movie
+                keyboard.append([InlineKeyboardButton(btn_text, callback_data=callback_data)])
+            
+            # Pagination row
+            if total_pages > 1:
+                nav_row = []
+                if page_num > 1:
+                    nav_row.append(InlineKeyboardButton("◀️ Пред", callback_data=f"sync_page_{page_num - 1}"))
+                nav_row.append(InlineKeyboardButton(f"{page_num}/{total_pages}", callback_data="noop"))
+                if page_num < total_pages:
+                    nav_row.append(InlineKeyboardButton("След ▶️", callback_data=f"sync_page_{page_num + 1}"))
+                keyboard.append(nav_row)
+            
+            # Action buttons
+            keyboard.append([
+                InlineKeyboardButton("⏭ Пропустить", callback_data=f"sync_skip_{sync_index}"),
+                InlineKeyboardButton("❌ Стоп", callback_data="sync_stop")
+            ])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            movie = movies_to_sync[sync_index]
+            header = f"🔍 Синхронизация ({progress})\n\n*{movie['title']}*\n\nНайдено в TMDB"
+            if total_pages > 1:
+                header += f" (стр. {page_num}/{total_pages})"
+            header += ":"
+            
+            await query.edit_message_text(header, reply_markup=reply_markup, parse_mode="Markdown")
+        return
     
     if data.startswith("sync_select_"):
         # Format: sync_select_index_tmdbid
@@ -2396,12 +2580,12 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_rename_text))
     
     # Callbacks
-    application.add_handler(CallbackQueryHandler(tmdb_add_callback, pattern=r"^(tmdb_add_|add_manual_)"))
+    application.add_handler(CallbackQueryHandler(tmdb_add_callback, pattern=r"^(tmdb_add_|tmdb_page_|add_manual_)"))
     application.add_handler(CallbackQueryHandler(page_callback, pattern=r"^(page_|list_|lpage_|movie_|noop)"))
     application.add_handler(CallbackQueryHandler(movie_action_callback, pattern=r"^(w_|d_|r_|cancel_rename|back_to_list|back_pages)"))
     application.add_handler(CallbackQueryHandler(watched_callback, pattern=r"^(wpage_|wmovie_)"))
     application.add_handler(CallbackQueryHandler(watched_action_callback, pattern=r"^(unw_|wd_|back_wlist)"))
-    application.add_handler(CallbackQueryHandler(sync_callback, pattern=r"^sync_"))
+    application.add_handler(CallbackQueryHandler(sync_callback, pattern=r"^(sync_select_|sync_skip_|sync_page_|sync_stop)"))
     
     print("🎬 Бот запущен!")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
