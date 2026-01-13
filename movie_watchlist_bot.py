@@ -1175,16 +1175,92 @@ async def movie_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
         if movie:
             # Store movie_id for rename
             context.user_data["rename_movie_id"] = movie_id
+            
+            # Show old title in monospace for easy copying
+            keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_rename")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
             await query.edit_message_text(
-                f"✏️ Переименовать:\n*{movie['title']}*\n\n"
-                f"Отправь новое название фильма:",
-                parse_mode="Markdown"
+                f"✏️ Переименовать:\n\n"
+                f"Старое название:\n`{movie['title']}`\n\n"
+                f"Отправь новое название:",
+                parse_mode="Markdown",
+                reply_markup=reply_markup
             )
         else:
             await query.answer("Ошибка", show_alert=True)
     
+    elif data == "cancel_rename":
+        context.user_data.pop("rename_movie_id", None)
+        await query.edit_message_text("❌ Переименование отменено")
+    
+    elif data == "back_to_list":
+        # Return to first page of list
+        await show_list_page(query.message, chat_id, 1, edit=True)
+    
     elif data == "back_pages":
         await show_page(query.message, chat_id, 0, edit=True)
+
+
+async def show_list_page(message, chat_id: int, page: int, edit: bool = False) -> None:
+    """Show list page for back_to_list button."""
+    to_watch = get_movies_db(chat_id, "to_watch")
+    
+    if not to_watch:
+        text = "📭 Список пуст!"
+        if edit:
+            await message.edit_text(text)
+        else:
+            await message.reply_text(text)
+        return
+    
+    per_page = 10
+    total_pages = (len(to_watch) + per_page - 1) // per_page
+    page = max(1, min(page, total_pages))
+    
+    start = (page - 1) * per_page
+    end = start + per_page
+    page_movies = to_watch[start:end]
+    
+    # Build message
+    header = f"📋 *К просмотру* (стр. {page}/{total_pages}):\n"
+    lines = [format_movie(m, start + i + 1) for i, m in enumerate(page_movies)]
+    text = header + "\n".join(lines)
+    
+    # Build keyboard
+    keyboard = []
+    
+    # Number buttons
+    row1 = []
+    row2 = []
+    for i, movie in enumerate(page_movies):
+        num = start + i + 1
+        btn = InlineKeyboardButton(str(num), callback_data=f"movie_{movie['id']}")
+        if i < 5:
+            row1.append(btn)
+        else:
+            row2.append(btn)
+    
+    if row1:
+        keyboard.append(row1)
+    if row2:
+        keyboard.append(row2)
+    
+    # Pagination row
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton("◀️", callback_data=f"list_{page - 1}_10__False"))
+    nav_row.append(InlineKeyboardButton(f"{page}/{total_pages}", callback_data="noop"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton("▶️", callback_data=f"list_{page + 1}_10__False"))
+    keyboard.append(nav_row)
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if edit:
+        await message.edit_text(text, parse_mode="Markdown", reply_markup=reply_markup)
+    else:
+        await message.reply_text(text, parse_mode="Markdown", reply_markup=reply_markup)
 
 
 async def watched_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2254,9 +2330,14 @@ async def handle_rename_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
     success, old_title = rename_movie_by_id(chat_id, movie_id, new_title)
     
     if success:
+        # Add "Back to list" button
+        keyboard = [[InlineKeyboardButton("◀️ К списку", callback_data="back_to_list")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         await update.message.reply_text(
             f"✏️ Переименовано:\n*{old_title}* → *{new_title}*",
-            parse_mode="Markdown"
+            parse_mode="Markdown",
+            reply_markup=reply_markup
         )
         context.user_data.pop("rename_movie_id", None)
     else:
@@ -2317,7 +2398,7 @@ def main() -> None:
     # Callbacks
     application.add_handler(CallbackQueryHandler(tmdb_add_callback, pattern=r"^(tmdb_add_|add_manual_)"))
     application.add_handler(CallbackQueryHandler(page_callback, pattern=r"^(page_|list_|lpage_|movie_|noop)"))
-    application.add_handler(CallbackQueryHandler(movie_action_callback, pattern=r"^(w_|d_|r_|back_pages)"))
+    application.add_handler(CallbackQueryHandler(movie_action_callback, pattern=r"^(w_|d_|r_|cancel_rename|back_to_list|back_pages)"))
     application.add_handler(CallbackQueryHandler(watched_callback, pattern=r"^(wpage_|wmovie_)"))
     application.add_handler(CallbackQueryHandler(watched_action_callback, pattern=r"^(unw_|wd_|back_wlist)"))
     application.add_handler(CallbackQueryHandler(sync_callback, pattern=r"^sync_"))
