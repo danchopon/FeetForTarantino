@@ -297,6 +297,37 @@ def update_movie_tmdb_data(chat_id: int, movie_id: int, tmdb_id: int, year: int 
     return success
 
 
+def rename_movie_by_id(chat_id: int, movie_id: int, new_title: str) -> tuple[bool, str | None]:
+    """Rename a movie."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute("SELECT id, title FROM movies WHERE chat_id = %s AND id = %s", (chat_id, movie_id))
+    row = cur.fetchone()
+    
+    if not row:
+        cur.close()
+        conn.close()
+        return False, None
+    
+    old_title = row["title"]
+    
+    try:
+        cur.execute(
+            "UPDATE movies SET title = %s WHERE chat_id = %s AND id = %s",
+            (new_title, chat_id, movie_id)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True, old_title
+    except psycopg2.errors.UniqueViolation:
+        conn.rollback()
+        cur.close()
+        conn.close()
+        return False, old_title
+
+
 def remove_movie_by_id(chat_id: int, movie_id: int) -> str | None:
     conn = get_db_connection()
     cur = conn.cursor()
@@ -565,6 +596,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 `/info 5` — инфо о фильме
 `/watched 5` — отметить просмотренным
 `/remove 5` — удалить
+`/rename 5 Новое название` — переименовать
 
 *Рандом и голосование:*
 `/random` — случайный фильм
@@ -1100,6 +1132,7 @@ async def show_movie_detail(query, movie: dict, chat_id: int) -> None:
             InlineKeyboardButton("✅ Просмотрено", callback_data=f"w_{movie['id']}"),
             InlineKeyboardButton("🗑 Удалить", callback_data=f"d_{movie['id']}")
         ],
+        [InlineKeyboardButton("✏️ Переименовать", callback_data=f"r_{movie['id']}")],
         [InlineKeyboardButton("◀️ Назад", callback_data="back_pages")]
     ]
     
@@ -1107,7 +1140,7 @@ async def show_movie_detail(query, movie: dict, chat_id: int) -> None:
 
 
 async def movie_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle watched/delete actions from movie detail."""
+    """Handle watched/delete/rename actions from movie detail."""
     query = update.callback_query
     await query.answer()
     
@@ -1132,6 +1165,21 @@ async def movie_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
         if title:
             await query.answer(f"🗑 {title} удалён!", show_alert=True)
             await show_page(query.message, chat_id, 0, edit=True)
+        else:
+            await query.answer("Ошибка", show_alert=True)
+    
+    elif data.startswith("r_"):
+        movie_id = int(data.replace("r_", ""))
+        movie = get_movie_by_id(chat_id, movie_id)
+        
+        if movie:
+            # Store movie_id for rename
+            context.user_data["rename_movie_id"] = movie_id
+            await query.edit_message_text(
+                f"✏️ Переименовать:\n*{movie['title']}*\n\n"
+                f"Отправь новое название фильма:",
+                parse_mode="Markdown"
+            )
         else:
             await query.answer("Ошибка", show_alert=True)
     
@@ -1420,6 +1468,52 @@ async def remove_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(f"🗑️ *{title}* удалён", parse_mode="Markdown")
     else:
         await update.message.reply_text(f"❌ Фильм *{search}* не найден", parse_mode="Markdown")
+
+
+async def rename_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Rename movie by number. Usage: /rename 5 New Title"""
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "❌ Укажи номер и новое название:\n`/rename 5 Новое название`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    chat_id = update.effective_chat.id
+    to_watch = get_movies_db(chat_id, "to_watch")
+    
+    try:
+        num = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Первый аргумент должен быть номером фильма")
+        return
+    
+    if num < 1 or num > len(to_watch):
+        await update.message.reply_text(f"❌ Номер должен быть 1-{len(to_watch)}")
+        return
+    
+    new_title = " ".join(context.args[1:]).strip()
+    
+    if not new_title:
+        await update.message.reply_text("❌ Укажи новое название")
+        return
+    
+    movie = to_watch[num - 1]
+    success, old_title = rename_movie_by_id(chat_id, movie['id'], new_title)
+    
+    if success:
+        await update.message.reply_text(
+            f"✏️ Переименовано:\n*{old_title}* → *{new_title}*",
+            parse_mode="Markdown"
+        )
+    else:
+        if old_title:
+            await update.message.reply_text(
+                f"❌ Фильм *{new_title}* уже есть в списке",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text("❌ Фильм не найден")
 
 
 async def random_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2143,6 +2237,39 @@ async def basket_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(f"🗑️ Корзина очищена ({count})")
 
 
+async def handle_rename_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle text message for renaming movie."""
+    movie_id = context.user_data.get("rename_movie_id")
+    
+    if not movie_id:
+        return  # Not in rename mode
+    
+    chat_id = update.effective_chat.id
+    new_title = update.message.text.strip()
+    
+    if not new_title:
+        await update.message.reply_text("❌ Название не может быть пустым")
+        return
+    
+    success, old_title = rename_movie_by_id(chat_id, movie_id, new_title)
+    
+    if success:
+        await update.message.reply_text(
+            f"✏️ Переименовано:\n*{old_title}* → *{new_title}*",
+            parse_mode="Markdown"
+        )
+        context.user_data.pop("rename_movie_id", None)
+    else:
+        if old_title:
+            await update.message.reply_text(
+                f"❌ Фильм *{new_title}* уже есть в списке",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text("❌ Фильм не найден")
+            context.user_data.pop("rename_movie_id", None)
+
+
 # ============== MAIN ==============
 
 def main() -> None:
@@ -2162,6 +2289,7 @@ def main() -> None:
     application.add_handler(CommandHandler("add", add_movie))
     application.add_handler(CommandHandler("watched", mark_watched))
     application.add_handler(CommandHandler("remove", remove_movie))
+    application.add_handler(CommandHandler("rename", rename_movie))
     application.add_handler(CommandHandler("list", list_movies))
     application.add_handler(CommandHandler("pages", pages_command))
     application.add_handler(CommandHandler("wlist", wlist_command))
@@ -2183,10 +2311,13 @@ def main() -> None:
     application.add_handler(CommandHandler("vrand", basket_random))
     application.add_handler(CommandHandler("vc", basket_clear))
     
+    # Text handler for rename (must be after commands)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_rename_text))
+    
     # Callbacks
     application.add_handler(CallbackQueryHandler(tmdb_add_callback, pattern=r"^(tmdb_add_|add_manual_)"))
     application.add_handler(CallbackQueryHandler(page_callback, pattern=r"^(page_|list_|lpage_|movie_|noop)"))
-    application.add_handler(CallbackQueryHandler(movie_action_callback, pattern=r"^(w_|d_|back_pages)"))
+    application.add_handler(CallbackQueryHandler(movie_action_callback, pattern=r"^(w_|d_|r_|back_pages)"))
     application.add_handler(CallbackQueryHandler(watched_callback, pattern=r"^(wpage_|wmovie_)"))
     application.add_handler(CallbackQueryHandler(watched_action_callback, pattern=r"^(unw_|wd_|back_wlist)"))
     application.add_handler(CallbackQueryHandler(sync_callback, pattern=r"^sync_"))
