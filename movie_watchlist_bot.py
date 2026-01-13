@@ -278,6 +278,25 @@ def unwatch_movie_by_id(chat_id: int, movie_id: int) -> tuple[bool, str | None]:
     return True, row["title"]
 
 
+def update_movie_tmdb_data(chat_id: int, movie_id: int, tmdb_id: int, year: int = None, 
+                           rating: float = None, poster_path: str = None, genres: str = None) -> bool:
+    """Update movie with TMDB data."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute(
+        """UPDATE movies 
+           SET tmdb_id = %s, year = %s, rating = %s, poster_path = %s, genres = %s 
+           WHERE chat_id = %s AND id = %s""",
+        (tmdb_id, year, rating, poster_path, genres, chat_id, movie_id)
+    )
+    conn.commit()
+    success = cur.rowcount > 0
+    cur.close()
+    conn.close()
+    return success
+
+
 def remove_movie_by_id(chat_id: int, movie_id: int) -> str | None:
     conn = get_db_connection()
     cur = conn.cursor()
@@ -564,6 +583,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 *Дополнительно:*
 `/suggest` — рекомендации
+`/sync` — синхронизация с TMDB
+`/sync 5` — синхронизировать фильм #5
+`/sync -a` — синхронизировать все
 `/export` — экспорт .txt
 `/export -csv` — экспорт .csv
 """
@@ -1668,6 +1690,190 @@ async def wlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(message, reply_markup=reply_markup, parse_mode="Markdown")
 
 
+async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Sync movies with TMDB."""
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    
+    # Parse arguments
+    sync_all = "-a" in args  # Sync even already linked movies
+    movie_num = None
+    
+    # Check if specific movie number provided
+    for arg in args:
+        if arg.isdigit():
+            movie_num = int(arg)
+            break
+    
+    to_watch = get_movies_db(chat_id, "to_watch")
+    
+    if not to_watch:
+        await update.message.reply_text("📭 Список пуст!")
+        return
+    
+    # Get movies to sync
+    if movie_num:
+        # Sync specific movie
+        if movie_num < 1 or movie_num > len(to_watch):
+            await update.message.reply_text(f"❌ Номер должен быть 1-{len(to_watch)}")
+            return
+        movies_to_sync = [to_watch[movie_num - 1]]
+        start_index = movie_num - 1
+    else:
+        # Sync all unlinked (or all with -a)
+        if sync_all:
+            movies_to_sync = to_watch
+        else:
+            movies_to_sync = [m for m in to_watch if not m.get("tmdb_id")]
+        start_index = 0
+    
+    if not movies_to_sync:
+        await update.message.reply_text("✅ Все фильмы уже связаны с TMDB!")
+        return
+    
+    # Store sync state
+    context.user_data["sync_movies"] = movies_to_sync
+    context.user_data["sync_index"] = start_index
+    context.user_data["sync_chat_id"] = chat_id
+    
+    # Start syncing first movie
+    await show_sync_movie(update.message, context, start_index)
+
+
+async def show_sync_movie(message, context: ContextTypes.DEFAULT_TYPE, index: int) -> None:
+    """Show TMDB search results for movie to sync."""
+    movies_to_sync = context.user_data.get("sync_movies", [])
+    
+    if index >= len(movies_to_sync):
+        await message.reply_text("✅ Синхронизация завершена!")
+        context.user_data.pop("sync_movies", None)
+        context.user_data.pop("sync_index", None)
+        context.user_data.pop("sync_chat_id", None)
+        return
+    
+    movie = movies_to_sync[index]
+    progress = f"{index + 1}/{len(movies_to_sync)}"
+    
+    # Search TMDB
+    if not TMDB_API_KEY:
+        await message.reply_text("❌ TMDB API не настроен")
+        return
+    
+    results = await tmdb_search(movie["title"])
+    
+    if not results:
+        # No results - show skip/stop
+        keyboard = [
+            [InlineKeyboardButton("⏭ Пропустить", callback_data=f"sync_skip_{index}")],
+            [InlineKeyboardButton("❌ Стоп", callback_data="sync_stop")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await message.reply_text(
+            f"🔍 Синхронизация ({progress})\n\n"
+            f"*{movie['title']}*\n\n"
+            f"❌ Не найдено в TMDB",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Show search results
+    keyboard = []
+    context.user_data["sync_tmdb_results"] = {}
+    
+    for i, tmdb_movie in enumerate(results[:5]):
+        year = tmdb_movie.get("release_date", "")[:4]
+        rating = tmdb_movie.get("vote_average", 0)
+        title = tmdb_movie.get("title", "Unknown")
+        
+        btn_text = f"{title}"
+        if year:
+            btn_text += f" ({year})"
+        if rating:
+            btn_text += f" ⭐{rating:.1f}"
+        
+        callback_data = f"sync_select_{index}_{tmdb_movie['id']}"
+        context.user_data["sync_tmdb_results"][str(tmdb_movie['id'])] = tmdb_movie
+        keyboard.append([InlineKeyboardButton(btn_text, callback_data=callback_data)])
+    
+    # Action buttons
+    keyboard.append([
+        InlineKeyboardButton("⏭ Пропустить", callback_data=f"sync_skip_{index}"),
+        InlineKeyboardButton("❌ Стоп", callback_data="sync_stop")
+    ])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await message.reply_text(
+        f"🔍 Синхронизация ({progress})\n\n"
+        f"*{movie['title']}*\n\n"
+        f"Найдено в TMDB:",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+
+async def sync_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle sync actions."""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    chat_id = context.user_data.get("sync_chat_id")
+    
+    if data.startswith("sync_select_"):
+        # Format: sync_select_index_tmdbid
+        parts = data.replace("sync_select_", "").split("_")
+        index = int(parts[0])
+        tmdb_id = parts[1]
+        
+        movies_to_sync = context.user_data.get("sync_movies", [])
+        movie = movies_to_sync[index]
+        tmdb_movie = context.user_data.get("sync_tmdb_results", {}).get(tmdb_id)
+        
+        if tmdb_movie:
+            # Update movie with TMDB data
+            year = int(tmdb_movie.get("release_date", "0000")[:4]) if tmdb_movie.get("release_date") else None
+            rating = tmdb_movie.get("vote_average")
+            poster_path = tmdb_movie.get("poster_path")
+            genres = ",".join(map(str, tmdb_movie.get("genre_ids", [])))
+            
+            success = update_movie_tmdb_data(
+                chat_id, movie["id"], int(tmdb_id),
+                year=year, rating=rating, poster_path=poster_path, genres=genres
+            )
+            
+            if success:
+                await query.answer(f"✅ {movie['title']} обновлен!", show_alert=True)
+                
+                # Show next movie
+                context.user_data["sync_index"] = index + 1
+                await query.edit_message_text(
+                    f"✅ *{movie['title']}* синхронизирован с TMDB!",
+                    parse_mode="Markdown"
+                )
+                await show_sync_movie(query.message, context, index + 1)
+            else:
+                await query.answer("❌ Ошибка обновления", show_alert=True)
+        else:
+            await query.answer("❌ Фильм не найден", show_alert=True)
+    
+    elif data.startswith("sync_skip_"):
+        index = int(data.replace("sync_skip_", ""))
+        movies_to_sync = context.user_data.get("sync_movies", [])
+        movie = movies_to_sync[index]
+        
+        await query.edit_message_text(f"⏭ *{movie['title']}* пропущен", parse_mode="Markdown")
+        await show_sync_movie(query.message, context, index + 1)
+    
+    elif data == "sync_stop":
+        context.user_data.pop("sync_movies", None)
+        context.user_data.pop("sync_index", None)
+        context.user_data.pop("sync_chat_id", None)
+        context.user_data.pop("sync_tmdb_results", None)
+        await query.edit_message_text("❌ Синхронизация остановлена")
+
+
 async def export_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Export movie list to text or CSV file."""
     chat_id = update.effective_chat.id
@@ -1965,6 +2171,7 @@ def main() -> None:
     application.add_handler(CommandHandler("vote", vote_poll))
     application.add_handler(CommandHandler("rpoll", random_from_selection))
     application.add_handler(CommandHandler("suggest", suggest_movies))
+    application.add_handler(CommandHandler("sync", sync_command))
     application.add_handler(CommandHandler("export", export_list))
     
     # Vote basket
@@ -1982,6 +2189,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(movie_action_callback, pattern=r"^(w_|d_|back_pages)"))
     application.add_handler(CallbackQueryHandler(watched_callback, pattern=r"^(wpage_|wmovie_)"))
     application.add_handler(CallbackQueryHandler(watched_action_callback, pattern=r"^(unw_|wd_|back_wlist)"))
+    application.add_handler(CallbackQueryHandler(sync_callback, pattern=r"^sync_"))
     
     print("🎬 Бот запущен!")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
