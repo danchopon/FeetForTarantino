@@ -622,6 +622,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 `/sync` — синхронизация с TMDB
 `/sync 5` — синхронизировать фильм #5
 `/sync -a` — синхронизировать все
+`/sync -w` — синхронизировать просмотренные
 `/export` — экспорт .txt
 `/export -csv` — экспорт .csv
 """
@@ -1958,6 +1959,7 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     
     # Parse arguments
     sync_all = "-a" in args  # Sync even already linked movies
+    sync_watched = "-w" in args  # Sync watched movies
     movie_num = None
     
     # Check if specific movie number provided
@@ -1966,26 +1968,32 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             movie_num = int(arg)
             break
     
-    to_watch = get_movies_db(chat_id, "to_watch")
+    # Get movies based on status
+    if sync_watched:
+        movies = get_movies_db(chat_id, "watched")
+        status_name = "просмотренных"
+    else:
+        movies = get_movies_db(chat_id, "to_watch")
+        status_name = "к просмотру"
     
-    if not to_watch:
-        await update.message.reply_text("📭 Список пуст!")
+    if not movies:
+        await update.message.reply_text(f"📭 Список {status_name} пуст!")
         return
     
     # Get movies to sync
     if movie_num:
         # Sync specific movie
-        if movie_num < 1 or movie_num > len(to_watch):
-            await update.message.reply_text(f"❌ Номер должен быть 1-{len(to_watch)}")
+        if movie_num < 1 or movie_num > len(movies):
+            await update.message.reply_text(f"❌ Номер должен быть 1-{len(movies)}")
             return
-        movies_to_sync = [to_watch[movie_num - 1]]
+        movies_to_sync = [movies[movie_num - 1]]
         start_index = movie_num - 1
     else:
         # Sync all unlinked (or all with -a)
         if sync_all:
-            movies_to_sync = to_watch
+            movies_to_sync = movies
         else:
-            movies_to_sync = [m for m in to_watch if not m.get("tmdb_id")]
+            movies_to_sync = [m for m in movies if not m.get("tmdb_id")]
         start_index = 0
     
     if not movies_to_sync:
@@ -1996,6 +2004,7 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     context.user_data["sync_movies"] = movies_to_sync
     context.user_data["sync_index"] = start_index
     context.user_data["sync_chat_id"] = chat_id
+    context.user_data["sync_status"] = "watched" if sync_watched else "to_watch"
     
     # Start syncing first movie
     await show_sync_movie(update.message, context, start_index)
