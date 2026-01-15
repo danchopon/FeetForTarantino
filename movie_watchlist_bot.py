@@ -2651,9 +2651,12 @@ async def wheel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """Запустить рулетку выбора фильма."""
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
+    chat_type = update.effective_chat.type
     
     # DEBUG: Показываем что видит бот
     logger.info(f"MINIAPP_URL: {MINIAPP_URL}")
+    logger.info(f"Chat type: {chat_type}")
+    
     
     # Проверяем что URL настроен
     if not MINIAPP_URL:
@@ -2718,29 +2721,50 @@ async def wheel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     # Сохраняем в context для обработки результата
     context.user_data["wheel_movies"] = {m["title"]: m for m in movies}
-    context.user_data["wheel_session_id"] = session_id  # Сохраняем для debug
+    context.user_data["wheel_session_id"] = session_id
     
-    # Создаем ReplyKeyboard с WebApp кнопкой
-    test_url = MINIAPP_URL  # Без ?s=
-    logger.info(f"WebApp URL: {test_url}")
+    # Формируем URL с session_id
+    webapp_url = f"{MINIAPP_URL}?s={session_id}"
+    logger.info(f"WebApp URL: {webapp_url}")
     
-    keyboard = ReplyKeyboardMarkup([[
-        KeyboardButton(
-            text="🎰 Открыть рулетку",
-            web_app=WebAppInfo(url=test_url)
-        )
-    ]], resize_keyboard=True, one_time_keyboard=True)
-    
-    # Отправляем список фильмов текстом
+    # Список фильмов для сообщения
     movies_list = "\n".join([f"• {m['title']} ({m['chance']:.1f}%)" for m in movies[:15]])
     if len(movies) > 15:
         movies_list += f"\n...и ещё {len(movies) - 15}"
     
-    # Простое сообщение без markdown
-    await update.message.reply_text(
-        f"Участвуют {len(movies)} фильмов. Нажми кнопку:",
-        reply_markup=keyboard
-    )
+    # В ГРУППЕ: Отправляем inline кнопку с URL
+    if chat_type in ["group", "supergroup"]:
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                "🎰 Открыть рулетку",
+                url=webapp_url
+            )
+        ]])
+        
+        await update.message.reply_text(
+            "🎬 Запускаем рулетку выбора фильма!\n\n"
+            f"📊 Участвуют {len(movies)} фильм(ов):\n\n"
+            f"{movies_list}\n\n"
+            "👇 Нажми кнопку чтобы открыть рулетку:",
+            reply_markup=keyboard
+        )
+    
+    # В ЛИЧКЕ: Отправляем WebApp кнопку (работает лучше)
+    else:
+        keyboard = ReplyKeyboardMarkup([[
+            KeyboardButton(
+                text="🎰 Открыть рулетку",
+                web_app=WebAppInfo(url=webapp_url)
+            )
+        ]], resize_keyboard=True, one_time_keyboard=True)
+        
+        await update.message.reply_text(
+            "🎬 Запускаем рулетку выбора фильма!\n\n"
+            f"📊 Участвуют {len(movies)} фильм(ов):\n\n"
+            f"{movies_list}\n\n"
+            "Нажми кнопку ниже:",
+            reply_markup=keyboard
+        )
 
 
 # ============== WHEEL SESSION ==============
