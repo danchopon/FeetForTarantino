@@ -14,7 +14,7 @@ from io import BytesIO
 import httpx
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import (
     Application,
     CommandHandler,
