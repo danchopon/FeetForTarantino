@@ -26,21 +26,15 @@ from telegram.ext import (
 
 import urllib.parse
 
-# Mini App URL
-MINIAPP_URL = "https://movie-wheel-miniapp.vercel.app"
-
-# Можно переопределить через переменную окружения
-if os.environ.get("MINIAPP_URL"):
-    MINIAPP_URL = os.environ.get("MINIAPP_URL")
-    logger.info(f"Using MINIAPP_URL from environment: {MINIAPP_URL}")
-else:
-    logger.info(f"Using hardcoded MINIAPP_URL: {MINIAPP_URL}")
-
 # Logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# Mini App URL - ТВОЙ URL ОТ VERCEL
+MINIAPP_URL = os.environ.get("MINIAPP_URL", "https://movie-wheel-miniapp.vercel.app")
+logger.info(f"MINIAPP_URL: {MINIAPP_URL}")
 
 # TMDB Config
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
