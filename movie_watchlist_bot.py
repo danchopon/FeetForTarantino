@@ -26,7 +26,8 @@ from telegram.ext import (
 
 import urllib.parse
 
-MINIAPP_URL = "https://movie-wheel-miniapp.vercel.app/"
+# Mini App URL
+MINIAPP_URL = os.environ.get("MINIAPP_URL", "https://movie-wheel-miniapp.vercel.app")
 
 # Logging
 logging.basicConfig(
@@ -101,7 +102,7 @@ def init_db():
     """)
     
     # Add new columns if they don't exist (migration)
-    for col, col_type in [("tmdb_id", "INT"), ("year", "INT"), ("rating", "REAL"), 
+    for col, col_type in [("tmdb_id", "INT"), ("year", "INT"), ("rating", "REAL"),
                           ("poster_path", "VARCHAR(255)"), ("genres", "TEXT")]:
         try:
             cur.execute(f"ALTER TABLE movies ADD COLUMN {col} {col_type}")
@@ -274,7 +275,7 @@ async def tmdb_discover_by_genres(genre_ids: list[int], exclude_ids: list[int] =
 
 # ============== DB FUNCTIONS ==============
 
-def add_movie_db(chat_id: int, title: str, added_by: str, 
+def add_movie_db(chat_id: int, title: str, added_by: str,
                  tmdb_id: int = None, year: int = None, rating: float = None,
                  poster_path: str = None, genres: str = None) -> tuple[bool, str]:
     conn = get_db_connection()
@@ -366,7 +367,7 @@ def unwatch_movie_by_id(chat_id: int, movie_id: int) -> tuple[bool, str | None]:
     return True, row["title"]
 
 
-def update_movie_tmdb_data(chat_id: int, movie_id: int, tmdb_id: int, year: int = None, 
+def update_movie_tmdb_data(chat_id: int, movie_id: int, tmdb_id: int, year: int = None,
                            rating: float = None, poster_path: str = None, genres: str = None) -> bool:
     """Update movie with TMDB data."""
     conn = get_db_connection()
@@ -1643,14 +1644,14 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if movie.get("poster_path") and TMDB_API_KEY:
         poster_url = f"{TMDB_IMAGE_URL}{movie['poster_path']}"
         await update.message.reply_photo(
-            poster_url, 
-            caption="\n".join(parts), 
+            poster_url,
+            caption="\n".join(parts),
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     else:
         await update.message.reply_text(
-            "\n".join(parts), 
+            "\n".join(parts),
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -2649,6 +2650,14 @@ async def wheel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """Запустить рулетку выбора фильма."""
     chat_id = update.effective_chat.id
     
+    # Проверяем Mini App URL
+    if not MINIAPP_URL or MINIAPP_URL == "https://movie-wheel-miniapp.vercel.app":
+        await update.message.reply_text(
+            "❌ Mini App не настроен!\n\n"
+            "Администратору: Задеплой Mini App на Vercel и установи переменную окружения MINIAPP_URL"
+        )
+        return
+    
     # Получаем фильмы из корзины с шансами
     movies = get_basket_movies_with_chances(chat_id)
     
@@ -2663,13 +2672,20 @@ async def wheel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # Сохраняем в context для обработки результата
     context.user_data["wheel_movies"] = {m["title"]: m for m in movies}
     
+    logger.info(f"Creating WebApp button with URL: {MINIAPP_URL}")
+    
     # Создаем кнопку с Mini App
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton(
-            "🎰 Открыть рулетку",
-            web_app=WebAppInfo(url=MINIAPP_URL)
-        )
-    ]])
+    try:
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                "🎰 Открыть рулетку",
+                web_app=WebAppInfo(url=MINIAPP_URL)
+            )
+        ]])
+    except Exception as e:
+        logger.error(f"Failed to create WebApp button: {e}")
+        await update.message.reply_text(f"❌ Ошибка создания кнопки: {e}")
+        return
     
     # Отправляем список фильмов текстом
     movies_list = "\n".join([f"• {m['title']} ({m['chance']:.1f}%)" for m in movies[:15]])
