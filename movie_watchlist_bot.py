@@ -27,7 +27,7 @@ from telegram.ext import (
 import urllib.parse
 
 # Mini App URL
-MINIAPP_URL = os.environ.get("MINIAPP_URL", "https://movie-wheel-miniapp.vercel.app")
+MINIAPP_URL = os.environ.get("MINIAPP_URL") or "https://movie-wheel-miniapp.vercel.app"
 
 # Logging
 logging.basicConfig(
@@ -2651,11 +2651,16 @@ async def wheel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     
-    # Проверяем Mini App URL
+    # DEBUG: Показываем что видит бот
+    logger.info(f"MINIAPP_URL from env: {MINIAPP_URL}")
+    
+    # Проверяем что URL настроен
     if not MINIAPP_URL or MINIAPP_URL == "https://movie-wheel-miniapp.vercel.app":
         await update.message.reply_text(
-            "❌ Mini App не настроен!\n\n"
-            "Администратору: Задеплой Mini App на Vercel и установи переменную окружения MINIAPP_URL"
+            f"❌ Mini App не настроен!\n\n"
+            f"DEBUG: MINIAPP_URL = `{MINIAPP_URL}`\n\n"
+            f"Администратору: Задеплой Mini App на Vercel и установи переменную окружения MINIAPP_URL",
+            parse_mode="Markdown"
         )
         return
     
@@ -2669,6 +2674,8 @@ async def wheel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             parse_mode="Markdown"
         )
         return
+    
+    logger.info(f"Starting wheel with MINIAPP_URL: {MINIAPP_URL}")
     
     # Создаем уникальный session_id
     session_id = f"{chat_id}_{user_id}_{int(datetime.now().timestamp())}"
@@ -2698,7 +2705,7 @@ async def wheel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         logger.error(f"Error creating session: {e}")
         await update.message.reply_text(
             "❌ Ошибка подключения к рулетке\n"
-            "Попробуйте позже"
+            f"Проверьте что API доступен: {MINIAPP_URL}/api/health"
         )
         return
     
