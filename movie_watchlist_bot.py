@@ -14,7 +14,7 @@ from io import BytesIO
 import httpx
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -2720,27 +2720,25 @@ async def wheel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     context.user_data["wheel_movies"] = {m["title"]: m for m in movies}
     context.user_data["wheel_session_id"] = session_id  # Сохраняем для debug
     
-    # Создаем кнопку с Mini App БЕЗ параметров (для теста)
+    # Создаем ReplyKeyboard с WebApp кнопкой
     test_url = MINIAPP_URL  # Без ?s=
     logger.info(f"WebApp URL: {test_url}")
     
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton(
-            "🎰 Открыть рулетку",
+    keyboard = ReplyKeyboardMarkup([[
+        KeyboardButton(
+            text="🎰 Открыть рулетку",
             web_app=WebAppInfo(url=test_url)
         )
-    ]])
+    ]], resize_keyboard=True, one_time_keyboard=True)
     
     # Отправляем список фильмов текстом
     movies_list = "\n".join([f"• {m['title']} ({m['chance']:.1f}%)" for m in movies[:15]])
     if len(movies) > 15:
         movies_list += f"\n...и ещё {len(movies) - 15}"
     
+    # Простое сообщение без markdown
     await update.message.reply_text(
-        "🎬 Запускаем рулетку выбора фильма!\n\n"
-        f"📊 Участвуют {len(movies)} фильм(ов):\n\n"
-        f"{movies_list}\n\n"
-        "Нажми кнопку ниже:",
+        f"Участвуют {len(movies)} фильмов. Нажми кнопку:",
         reply_markup=keyboard
     )
 
