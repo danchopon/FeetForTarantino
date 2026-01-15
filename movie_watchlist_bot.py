@@ -2718,12 +2718,16 @@ async def wheel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     # Сохраняем в context для обработки результата
     context.user_data["wheel_movies"] = {m["title"]: m for m in movies}
+    context.user_data["wheel_session_id"] = session_id  # Сохраняем для debug
     
-    # Создаем кнопку с Mini App + session_id
+    # Создаем кнопку с Mini App БЕЗ параметров (для теста)
+    test_url = MINIAPP_URL  # Без ?s=
+    logger.info(f"WebApp URL: {test_url}")
+    
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton(
             "🎰 Открыть рулетку",
-            web_app=WebAppInfo(url=f"{MINIAPP_URL}?s={session_id}")
+            web_app=WebAppInfo(url=test_url)
         )
     ]])
     
