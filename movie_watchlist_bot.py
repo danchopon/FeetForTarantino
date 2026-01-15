@@ -2678,8 +2678,14 @@ async def wheel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     logger.info(f"Starting wheel with MINIAPP_URL: {MINIAPP_URL}")
     
-    # Создаем уникальный session_id
-    session_id = f"{chat_id}_{user_id}_{int(datetime.now().timestamp())}"
+    # Создаем короткий уникальный session_id (только timestamp)
+    import hashlib
+    timestamp = int(datetime.now().timestamp())
+    # Хэш от chat_id + user_id для уникальности
+    hash_str = hashlib.md5(f"{chat_id}{user_id}".encode()).hexdigest()[:8]
+    session_id = f"{timestamp}{hash_str}"
+    
+    logger.info(f"Session ID: {session_id} (length: {len(session_id)})")
     
     # Отправляем данные в API
     try:
