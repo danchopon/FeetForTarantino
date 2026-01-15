@@ -24,6 +24,10 @@ from telegram.ext import (
     filters,
 )
 
+import urllib.parse
+
+MINIAPP_URL = "https://movie-wheel-miniapp.vercel.app/"
+
 # Logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -696,6 +700,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 `/go` — запустить poll
 `/vrand` — рандом из корзины
 `/vc` — очистить всю
+
+*Рулетка:*
+`/wheel` — запустить рулетку выбора фильма
 
 *Дополнительно:*
 `/suggest` — рекомендации
@@ -2635,7 +2642,218 @@ async def handle_rename_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
         else:
             await update.message.reply_text("❌ Фильм не найден")
             context.user_data.pop("rename_movie_id", None)
+            
+# ============== КОМАНДА /wheel ==============
 
+async def wheel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Запустить рулетку выбора фильма."""
+    chat_id = update.effective_chat.id
+    
+    # Получаем фильмы из корзины с шансами
+    movies = get_basket_movies_with_chances(chat_id)
+    
+    if not movies:
+        await update.message.reply_text(
+            "❌ Корзина пуста!\n\n"
+            "Добавьте фильмы через `/v+ 1,5,12`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Формируем данные для Mini App
+    movies_data = json.dumps(movies)
+    
+    # Создаем кнопку с Mini App
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            "🎰 Открыть рулетку",
+            web_app=WebAppInfo(url=f"{MINIAPP_URL}?movies={urllib.parse.quote(movies_data)}")
+        )
+    ]])
+    
+    await update.message.reply_text(
+        "🎬 Запускаем рулетку выбора фильма!\n\n"
+        f"Участвуют {len(movies)} фильм(ов).\n"
+        "Нажми кнопку ниже:",
+        reply_markup=keyboard
+    )
+
+
+# ============== ПОЛУЧЕНИЕ ФИЛЬМОВ С ШАНСАМИ ==============
+
+def get_basket_movies_with_chances(chat_id: int) -> list:
+    """
+    Получить фильмы из корзины с рассчитанными шансами.
+    
+    Базовая версия: равные шансы для всех.
+    Можно добавить модификаторы (см. ниже).
+    """
+    # Получаем уникальные номера из корзины
+    unique_nums = get_unique_basket_movies(chat_id)
+    
+    if not unique_nums:
+        return []
+    
+    # Получаем список фильмов
+    to_watch = get_movies_db(chat_id, "to_watch")
+    
+    # Формируем данные для рулетки
+    movies = []
+    
+    for num in unique_nums:
+        if 1 <= num <= len(to_watch):
+            movie = to_watch[num - 1]
+            
+            # Базовый шанс = 100 / количество фильмов
+            chance = 100.0 / len(unique_nums)
+            
+            movies.append({
+                "title": movie["title"],
+                "chance": chance,
+                "movie_id": movie["id"]  # На будущее для модификаторов
+            })
+    
+    return movies
+
+
+# ============== РАСШИРЕННАЯ ВЕРСИЯ С МОДИФИКАТОРАМИ ==============
+
+def get_basket_movies_with_chances_advanced(chat_id: int) -> list:
+    """
+    Версия с модификаторами шансов.
+    
+    Модификаторы:
+    - Победитель в прошлый раз: -50%
+    - Высокий рейтинг (>8.0): +10%
+    - Добавлен давно (>30 дней): +20%
+    """
+    unique_nums = get_unique_basket_movies(chat_id)
+    
+    if not unique_nums:
+        return []
+    
+    to_watch = get_movies_db(chat_id, "to_watch")
+    movies = []
+    
+    # Получаем последнего победителя (если есть)
+    last_winner_id = get_last_wheel_winner(chat_id)
+    
+    for num in unique_nums:
+        if 1 <= num <= len(to_watch):
+            movie = to_watch[num - 1]
+            
+            # Базовый шанс
+            chance = 100.0 / len(unique_nums)
+            
+            # Модификатор: победитель в прошлый раз
+            if last_winner_id and movie["id"] == last_winner_id:
+                chance *= 0.5  # -50%
+            
+            # Модификатор: высокий рейтинг
+            if movie.get("rating", 0) >= 8.0:
+                chance *= 1.1  # +10%
+            
+            # Модификатор: старый фильм в списке
+            if movie.get("added_at"):
+                days_in_list = (datetime.now() - movie["added_at"]).days
+                if days_in_list > 30:
+                    chance *= 1.2  # +20%
+            
+            movies.append({
+                "title": movie["title"],
+                "chance": chance,
+                "movie_id": movie["id"]
+            })
+    
+    # Нормализовать шансы (чтобы сумма = 100)
+    total_chance = sum(m["chance"] for m in movies)
+    for m in movies:
+        m["chance"] = (m["chance"] / total_chance) * 100
+    
+    return movies
+
+
+# ============== СОХРАНЕНИЕ ПОБЕДИТЕЛЯ ==============
+
+def save_wheel_winner(chat_id: int, movie_title: str) -> None:
+    """Сохранить победителя рулетки для следующего раза."""
+    # Найти movie_id по названию
+    to_watch = get_movies_db(chat_id, "to_watch")
+    movie = next((m for m in to_watch if m["title"] == movie_title), None)
+    
+    if movie:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Создать таблицу если не существует
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS wheel_history (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                movie_id INT NOT NULL,
+                movie_title VARCHAR(255),
+                winner_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Сохранить победителя
+        cur.execute(
+            "INSERT INTO wheel_history (chat_id, movie_id, movie_title) VALUES (%s, %s, %s)",
+            (chat_id, movie["id"], movie_title)
+        )
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+
+
+def get_last_wheel_winner(chat_id: int) -> int | None:
+    """Получить ID последнего победителя рулетки."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        cur.execute("""
+            SELECT movie_id FROM wheel_history 
+            WHERE chat_id = %s 
+            ORDER BY winner_at DESC 
+            LIMIT 1
+        """, (chat_id,))
+        
+        row = cur.fetchone()
+        return row["movie_id"] if row else None
+    except:
+        return None
+    finally:
+        cur.close()
+        conn.close()
+
+
+# ============== ОБРАБОТЧИК РЕЗУЛЬТАТА ==============
+
+async def handle_wheel_result(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработать результат рулетки из Mini App."""
+    try:
+        data = json.loads(update.effective_message.web_app_data.data)
+        winner = data['winner']
+        chat_id = update.effective_message.chat_id
+        
+        # Сохранить победителя
+        save_wheel_winner(chat_id, winner)
+        
+        # Объявить в чате
+        await update.effective_message.reply_text(
+            f"🏆 Рулетка выбрала:\n\n"
+            f"*{winner}*\n\n"
+            f"Приятного просмотра! 🍿",
+            parse_mode="Markdown"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error handling wheel result: {e}")
+        await update.effective_message.reply_text(
+            "❌ Ошибка при обработке результата рулетки"
+        )
 
 # ============== MAIN ==============
 
@@ -2668,6 +2886,12 @@ def main() -> None:
     application.add_handler(CommandHandler("suggest", suggest_movies))
     application.add_handler(CommandHandler("sync", sync_command))
     application.add_handler(CommandHandler("export", export_list))
+    
+    application.add_handler(CommandHandler("wheel", wheel_command))
+    application.add_handler(MessageHandler(
+        filters.StatusUpdate.WEB_APP_DATA,
+        handle_wheel_result
+    ))
     
     # Vote basket
     application.add_handler(MessageHandler(filters.Regex(r'^/v\+'), basket_add_handler))
