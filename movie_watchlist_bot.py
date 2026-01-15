@@ -2798,12 +2798,10 @@ def get_basket_movies_with_chances(chat_id: int) -> list:
 
 def get_basket_movies_with_chances_advanced(chat_id: int) -> list:
     """
-    Версия с модификаторами шансов.
+    Версия с модификатором шансов.
     
-    Модификаторы:
+    Модификатор:
     - Победитель в прошлый раз: -50%
-    - Высокий рейтинг (>8.0): +10%
-    - Добавлен давно (>30 дней): +20%
     """
     unique_nums = get_unique_basket_movies(chat_id)
     
@@ -2826,16 +2824,6 @@ def get_basket_movies_with_chances_advanced(chat_id: int) -> list:
             # Модификатор: победитель в прошлый раз
             if last_winner_id and movie["id"] == last_winner_id:
                 chance *= 0.5  # -50%
-            
-            # Модификатор: высокий рейтинг
-            if movie.get("rating", 0) >= 8.0:
-                chance *= 1.1  # +10%
-            
-            # Модификатор: старый фильм в списке
-            if movie.get("added_at"):
-                days_in_list = (datetime.now() - movie["added_at"]).days
-                if days_in_list > 30:
-                    chance *= 1.2  # +20%
             
             movies.append({
                 "title": movie["title"],
