@@ -112,24 +112,104 @@ def init_db():
 
 # ============== TMDB API ==============
 
-async def tmdb_search(query: str, page: int = 1) -> dict:
-    """Search TMDB for movies with pagination."""
+def parse_movie_query(query: str) -> tuple[str, int | None]:
+    """Parse movie title and year from query.
+    
+    Examples:
+        "Inception 2010" -> ("Inception", 2010)
+        "Начало (2010)" -> ("Начало", 2010)
+        "The Matrix" -> ("The Matrix", None)
+    """
+    import re
+    
+    # Pattern 1: "Title (YYYY)"
+    match = re.search(r'^(.+?)\s*\((\d{4})\)\s*$', query)
+    if match:
+        return match.group(1).strip(), int(match.group(2))
+    
+    # Pattern 2: "Title YYYY" (year at the end)
+    match = re.search(r'^(.+?)\s+(\d{4})\s*$', query)
+    if match:
+        title = match.group(1).strip()
+        year = int(match.group(2))
+        # Only extract year if it looks reasonable (1900-2030)
+        if 1900 <= year <= 2030:
+            return title, year
+    
+    return query.strip(), None
+
+
+async def tmdb_search(query: str, page: int = 1, year: int | None = None) -> dict:
+    """Search TMDB for movies with pagination and year filter.
+    
+    Args:
+        query: Movie title to search
+        page: Page number (1-based)
+        year: Optional year filter (will search ±2 years)
+    """
     if not TMDB_API_KEY:
         return {"results": [], "total_pages": 0, "page": 1}
     
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(
-            f"{TMDB_BASE_URL}/search/movie",
-            params={"api_key": TMDB_API_KEY, "query": query, "language": "ru-RU", "page": page}
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            return {
-                "results": data.get("results", []),
-                "total_pages": min(data.get("total_pages", 0), 10),  # Limit to 10 pages max
-                "page": data.get("page", 1)
-            }
-    return {"results": [], "total_pages": 0, "page": 1}
+    async def search_tmdb(search_query: str, lang: str) -> dict:
+        """Helper to search TMDB with specific language."""
+        params = {
+            "api_key": TMDB_API_KEY,
+            "query": search_query,
+            "language": lang,
+            "page": page
+        }
+        if year:
+            params["year"] = year
+        
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{TMDB_BASE_URL}/search/movie", params=params)
+            if resp.status_code == 200:
+                return resp.json()
+        return {"results": [], "total_pages": 0, "page": 1}
+    
+    # Search in Russian first
+    data_ru = await search_tmdb(query, "ru-RU")
+    results = data_ru.get("results", [])
+    
+    # If few results, try English as well
+    if len(results) < 5:
+        data_en = await search_tmdb(query, "en-US")
+        en_results = data_en.get("results", [])
+        
+        # Deduplicate by tmdb_id
+        existing_ids = {r.get("id") for r in results}
+        for r in en_results:
+            if r.get("id") not in existing_ids:
+                results.append(r)
+                existing_ids.add(r.get("id"))
+    
+    # If year specified, filter results to ±2 years
+    if year and results:
+        filtered = []
+        for movie in results:
+            release_date = movie.get("release_date", "")
+            if release_date:
+                try:
+                    movie_year = int(release_date[:4])
+                    if year - 2 <= movie_year <= year + 2:
+                        filtered.append(movie)
+                except (ValueError, IndexError):
+                    pass
+            else:
+                # Include movies without release date
+                filtered.append(movie)
+        results = filtered
+    
+    # Sort by popularity (vote_count) and rating
+    results.sort(key=lambda x: (x.get("vote_count", 0) * x.get("vote_average", 0)), reverse=True)
+    
+    total_pages = min(data_ru.get("total_pages", 0), 10)  # Limit to 10 pages max
+    
+    return {
+        "results": results,
+        "total_pages": total_pages,
+        "page": page
+    }
 
 
 async def tmdb_get_movie(tmdb_id: int) -> dict | None:
@@ -691,12 +771,16 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = text.strip()
     
     if TMDB_API_KEY:
-        search_data = await tmdb_search(query, page=1)
+        # Parse title and year from query
+        title, year = parse_movie_query(query)
+        
+        search_data = await tmdb_search(title, page=1, year=year)
         results = search_data.get("results", [])
         
         if results:
             # Store search data for pagination
-            context.user_data["tmdb_search_query"] = query
+            context.user_data["tmdb_search_query"] = title
+            context.user_data["tmdb_search_year"] = year
             context.user_data["tmdb_search_mode"] = "add"
             context.user_data["tmdb_search_chat_id"] = chat_id
             
@@ -774,10 +858,11 @@ async def tmdb_add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         # Handle pagination
         page = int(data.replace("tmdb_page_", ""))
         search_query = context.user_data.get("tmdb_search_query")
+        search_year = context.user_data.get("tmdb_search_year")
         mode = context.user_data.get("tmdb_search_mode", "add")
         
         if search_query:
-            search_data = await tmdb_search(search_query, page=page)
+            search_data = await tmdb_search(search_query, page=page, year=search_year)
             
             # Update message with new page
             results = search_data.get("results", [])[:5]
@@ -813,8 +898,11 @@ async def tmdb_add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     nav_row.append(InlineKeyboardButton("След ▶️", callback_data=f"tmdb_page_{page_num + 1}"))
                 keyboard.append(nav_row)
             
-            # Add manual option
-            keyboard.append([InlineKeyboardButton(f"➕ Добавить как \"{search_query}\"", callback_data=f"add_manual_{search_query[:50]}")])
+            # Add manual option - use original query with year if it was provided
+            original_query = context.user_data.get("tmdb_search_query")
+            if search_year:
+                original_query = f"{original_query} ({search_year})"
+            keyboard.append([InlineKeyboardButton(f"➕ Добавить как \"{original_query}\"", callback_data=f"add_manual_{original_query[:50]}")])
             
             reply_markup = InlineKeyboardMarkup(keyboard)
             
@@ -2029,7 +2117,10 @@ async def show_sync_movie(message, context: ContextTypes.DEFAULT_TYPE, index: in
         await message.reply_text("❌ TMDB API не настроен")
         return
     
-    search_data = await tmdb_search(movie["title"], page=1)
+    # Parse title and year from movie title
+    title, year = parse_movie_query(movie["title"])
+    
+    search_data = await tmdb_search(title, page=1, year=year)
     results = search_data.get("results", [])
     
     if not results:
@@ -2049,7 +2140,8 @@ async def show_sync_movie(message, context: ContextTypes.DEFAULT_TYPE, index: in
         return
     
     # Store sync search data
-    context.user_data["tmdb_search_query"] = movie["title"]
+    context.user_data["tmdb_search_query"] = title
+    context.user_data["tmdb_search_year"] = year
     context.user_data["tmdb_search_mode"] = "sync"
     context.user_data["sync_current_movie_id"] = movie["id"]
     
@@ -2127,10 +2219,11 @@ async def sync_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         # Handle pagination in sync
         page = int(data.replace("sync_page_", ""))
         search_query = context.user_data.get("tmdb_search_query")
+        search_year = context.user_data.get("tmdb_search_year")
         sync_index = context.user_data.get("sync_index", 0)
         
         if search_query:
-            search_data = await tmdb_search(search_query, page=page)
+            search_data = await tmdb_search(search_query, page=page, year=search_year)
             movies_to_sync = context.user_data.get("sync_movies", [])
             progress = f"{sync_index + 1}/{len(movies_to_sync)}"
             
