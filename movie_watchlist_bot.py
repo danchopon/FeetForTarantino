@@ -2660,23 +2660,85 @@ async def wheel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
     
-    # Формируем данные для Mini App
-    movies_data = json.dumps(movies)
+    # Сохраняем в context для обработки результата
+    context.user_data["wheel_movies"] = {m["title"]: m for m in movies}
     
     # Создаем кнопку с Mini App
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton(
             "🎰 Открыть рулетку",
-            web_app=WebAppInfo(url=f"{MINIAPP_URL}?movies={urllib.parse.quote(movies_data)}")
+            web_app=WebAppInfo(url=MINIAPP_URL)
         )
     ]])
     
+    # Отправляем список фильмов текстом
+    movies_list = "\n".join([f"• {m['title']} ({m['chance']:.1f}%)" for m in movies[:15]])
+    if len(movies) > 15:
+        movies_list += f"\n...и ещё {len(movies) - 15}"
+    
     await update.message.reply_text(
         "🎬 Запускаем рулетку выбора фильма!\n\n"
-        f"Участвуют {len(movies)} фильм(ов).\n"
+        f"📊 Участвуют {len(movies)} фильм(ов):\n\n"
+        f"{movies_list}\n\n"
+        "⚠️ *Временно рулетка работает с тестовыми данными*\n"
         "Нажми кнопку ниже:",
+        parse_mode="Markdown",
         reply_markup=keyboard
     )
+
+
+# ============== WHEEL SESSION ==============
+
+def save_wheel_session(session_id: str, movies: list) -> None:
+    """Сохранить session данные для рулетки."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    # Создать таблицу если не существует
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS wheel_sessions (
+            session_id VARCHAR(255) PRIMARY KEY,
+            movies_data JSONB NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP + INTERVAL '1 hour'
+        )
+    """)
+    
+    # Очистить старые сессии (старше 1 часа)
+    cur.execute("DELETE FROM wheel_sessions WHERE expires_at < CURRENT_TIMESTAMP")
+    
+    # Сохранить данные
+    cur.execute(
+        "INSERT INTO wheel_sessions (session_id, movies_data) VALUES (%s, %s) "
+        "ON CONFLICT (session_id) DO UPDATE SET movies_data = EXCLUDED.movies_data",
+        (session_id, json.dumps(movies))
+    )
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_wheel_session(session_id: str) -> list | None:
+    """Получить session данные для рулетки."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        cur.execute(
+            "SELECT movies_data FROM wheel_sessions WHERE session_id = %s AND expires_at > CURRENT_TIMESTAMP",
+            (session_id,)
+        )
+        row = cur.fetchone()
+        
+        if row:
+            return json.loads(row["movies_data"])
+        return None
+    except:
+        return None
+    finally:
+        cur.close()
+        conn.close()
 
 
 # ============== ПОЛУЧЕНИЕ ФИЛЬМОВ С ШАНСАМИ ==============
