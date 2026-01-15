@@ -27,7 +27,14 @@ from telegram.ext import (
 import urllib.parse
 
 # Mini App URL
-MINIAPP_URL = os.environ.get("MINIAPP_URL") or "https://movie-wheel-miniapp.vercel.app"
+MINIAPP_URL = "https://movie-wheel-miniapp.vercel.app"
+
+# Можно переопределить через переменную окружения
+if os.environ.get("MINIAPP_URL"):
+    MINIAPP_URL = os.environ.get("MINIAPP_URL")
+    logger.info(f"Using MINIAPP_URL from environment: {MINIAPP_URL}")
+else:
+    logger.info(f"Using hardcoded MINIAPP_URL: {MINIAPP_URL}")
 
 # Logging
 logging.basicConfig(
@@ -2652,14 +2659,14 @@ async def wheel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user_id = update.effective_user.id
     
     # DEBUG: Показываем что видит бот
-    logger.info(f"MINIAPP_URL from env: {MINIAPP_URL}")
+    logger.info(f"MINIAPP_URL: {MINIAPP_URL}")
     
     # Проверяем что URL настроен
-    if not MINIAPP_URL or MINIAPP_URL == "https://movie-wheel-miniapp.vercel.app":
+    if not MINIAPP_URL:
         await update.message.reply_text(
             f"❌ Mini App не настроен!\n\n"
             f"DEBUG: MINIAPP_URL = `{MINIAPP_URL}`\n\n"
-            f"Администратору: Задеплой Mini App на Vercel и установи переменную окружения MINIAPP_URL",
+            f"Администратору: Установи переменную окружения MINIAPP_URL",
             parse_mode="Markdown"
         )
         return
