@@ -2649,6 +2649,7 @@ async def handle_rename_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def wheel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Запустить рулетку выбора фильма."""
     chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
     
     # Проверяем Mini App URL
     if not MINIAPP_URL or MINIAPP_URL == "https://movie-wheel-miniapp.vercel.app":
@@ -2669,23 +2670,48 @@ async def wheel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
     
+    # Создаем уникальный session_id
+    session_id = f"{chat_id}_{user_id}_{int(datetime.now().timestamp())}"
+    
+    # Отправляем данные в API
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{MINIAPP_URL}/api/session",
+                json={
+                    "session_id": session_id,
+                    "movies": movies
+                },
+                timeout=10.0
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"Failed to create session: {response.status_code}")
+                await update.message.reply_text(
+                    "❌ Ошибка создания сессии рулетки\n"
+                    "Попробуйте позже"
+                )
+                return
+                
+            logger.info(f"Created session: {session_id}")
+    except Exception as e:
+        logger.error(f"Error creating session: {e}")
+        await update.message.reply_text(
+            "❌ Ошибка подключения к рулетке\n"
+            "Попробуйте позже"
+        )
+        return
+    
     # Сохраняем в context для обработки результата
     context.user_data["wheel_movies"] = {m["title"]: m for m in movies}
     
-    logger.info(f"Creating WebApp button with URL: {MINIAPP_URL}")
-    
-    # Создаем кнопку с Mini App
-    try:
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton(
-                "🎰 Открыть рулетку",
-                web_app=WebAppInfo(url=MINIAPP_URL)
-            )
-        ]])
-    except Exception as e:
-        logger.error(f"Failed to create WebApp button: {e}")
-        await update.message.reply_text(f"❌ Ошибка создания кнопки: {e}")
-        return
+    # Создаем кнопку с Mini App + session_id
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            "🎰 Открыть рулетку",
+            web_app=WebAppInfo(url=f"{MINIAPP_URL}?s={session_id}")
+        )
+    ]])
     
     # Отправляем список фильмов текстом
     movies_list = "\n".join([f"• {m['title']} ({m['chance']:.1f}%)" for m in movies[:15]])
@@ -2696,9 +2722,7 @@ async def wheel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "🎬 Запускаем рулетку выбора фильма!\n\n"
         f"📊 Участвуют {len(movies)} фильм(ов):\n\n"
         f"{movies_list}\n\n"
-        "⚠️ *Временно рулетка работает с тестовыми данными*\n"
         "Нажми кнопку ниже:",
-        parse_mode="Markdown",
         reply_markup=keyboard
     )
 
