@@ -2697,7 +2697,9 @@ async def wheel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 f"{MINIAPP_URL}/api/session",
                 json={
                     "session_id": session_id,
-                    "movies": movies
+                    "movies": movies,
+                    "chat_id": chat_id,  # Для отправки результата обратно
+                    "user_id": user_id
                 },
                 timeout=10.0
             )
@@ -2732,12 +2734,17 @@ async def wheel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if len(movies) > 15:
         movies_list += f"\n...и ещё {len(movies) - 15}"
     
-    # В ГРУППЕ: Отправляем inline кнопку с URL
+    # В ГРУППЕ: Отправляем inline кнопку с URL + кнопка результата
     if chat_type in ["group", "supergroup"]:
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton(
                 "🎰 Открыть рулетку",
                 url=webapp_url
+            )
+        ], [
+            InlineKeyboardButton(
+                "📢 Объявить результат",
+                callback_data=f"wheel_result_{session_id}"
             )
         ]])
         
@@ -2985,6 +2992,54 @@ async def handle_wheel_result(update: Update, context: ContextTypes.DEFAULT_TYPE
             "❌ Ошибка при обработке результата рулетки"
         )
 
+
+async def announce_wheel_result(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Объявить результат рулетки по нажатию кнопки."""
+    query = update.callback_query
+    await query.answer()
+    
+    # Извлекаем session_id из callback_data
+    session_id = query.data.replace("wheel_result_", "")
+    
+    try:
+        # Получаем результат из API
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{MINIAPP_URL}/api/session/{session_id}")
+            
+            if response.status_code != 200:
+                await query.message.reply_text(
+                    "❌ Результат еще не готов. Сначала покрутите рулетку!"
+                )
+                return
+            
+            data = response.json()
+            winner = data.get('winner')
+            
+            if not winner:
+                await query.message.reply_text(
+                    "❌ Результат еще не готов. Сначала покрутите рулетку!"
+                )
+                return
+            
+            # Сохранить победителя
+            chat_id = update.effective_chat.id
+            save_wheel_winner(chat_id, winner)
+            
+            # Объявить результат
+            await query.message.reply_text(
+                f"🏆 Рулетка выбрала:\n\n"
+                f"*{winner}*\n\n"
+                f"Приятного просмотра! 🍿",
+                parse_mode="Markdown"
+            )
+            
+    except Exception as e:
+        logger.error(f"Error announcing wheel result: {e}")
+        await query.message.reply_text(
+            "❌ Ошибка при получении результата"
+        )
+
+
 # ============== MAIN ==============
 
 def main() -> None:
@@ -3022,6 +3077,7 @@ def main() -> None:
         filters.StatusUpdate.WEB_APP_DATA,
         handle_wheel_result
     ))
+    application.add_handler(CallbackQueryHandler(announce_wheel_result, pattern=r"^wheel_result_"))
     
     # Vote basket
     application.add_handler(MessageHandler(filters.Regex(r'^/v\+'), basket_add_handler))
