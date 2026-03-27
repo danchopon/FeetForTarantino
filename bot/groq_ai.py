@@ -1,49 +1,63 @@
 """
-Groq AI integration for smart movie recommendations.
+Groq AI integration for smart movie recommendations (/rec command).
 
-Uses Llama 3.1 70B via Groq to analyze watch history and generate
-personalized movie suggestions, then enriches them with TMDB data.
+Handles three intents automatically:
+- similar: "как Inception", "похожее на Начало"
+- mood: "мрачный триллер", "что-то весёлое"
+- history: empty query → based on group's watch history
 """
 
 import os
 import json
 import logging
+import httpx
 from groq import AsyncGroq
 from bot.db import get_movies_db
-from bot.tmdb_api import tmdb_search, TMDB_API_KEY
-import httpx
 
 logger = logging.getLogger(__name__)
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GROQ_MODEL = "llama-3.3-70b-versatile"
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
+TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
 
-SYSTEM_PROMPT = """You are a knowledgeable movie recommendation expert.
-Your job is to suggest movies based on a user's request and their group's viewing history.
+SYSTEM_PROMPT = """You are a smart movie recommendation assistant for a group chat.
+
+Analyze the user's request and watch history, then suggest exactly 3 movies.
+
+First, detect the intent:
+- "similar" — user mentions a specific movie title (e.g. "like Inception", "похожее на Начало", "как Prestige")
+- "mood" — user describes a vibe, genre, or theme (e.g. "мрачный триллер", "something funny", "sci-fi с хорошим сюжетом")
+- "history" — empty request or just asks for recommendations without specifics
 
 Rules:
-- Suggest exactly 3 movies
-- Do NOT suggest movies already in the watched list or watchlist
-- Consider the user's taste based on their watch history
-- Return ONLY a valid JSON array, no other text
+- DO NOT suggest movies already in the watched list or watchlist
+- For "similar" intent: recommend movies similar in style, theme, or director to the mentioned film
+- For "mood" intent: match the described vibe, reference specific watched films when relevant
+- For "history" intent: analyze patterns in watch history (genres, ratings, directors) and suggest accordingly
+- Reasons must be in Russian, personal and specific (e.g. "Вам понравился Prisoners — тот же режиссёр и атмосфера напряжения")
+- Return ONLY valid JSON, no other text
 
 Response format:
-[
-  {
-    "title": "Movie Title in English",
-    "year": 2010,
-    "reason": "Short explanation in Russian why this fits the request (1-2 sentences)"
-  }
-]"""
+{
+  "intent": "similar|mood|history",
+  "source_movie": "Movie Title (only for similar intent, otherwise null)",
+  "suggestions": [
+    {
+      "title": "Movie Title in English",
+      "year": 2010,
+      "reason": "Объяснение на русском (1-2 предложения, конкретное)"
+    }
+  ]
+}"""
 
 
 def _build_user_prompt(query: str, watched: list[dict], watchlist: list[dict]) -> str:
     parts = []
 
     if watched:
-        watched_lines = []
-        for m in watched[:30]:  # limit context
+        lines = []
+        for m in watched[:30]:
             line = f"- {m['title']}"
             if m.get("year"):
                 line += f" ({m['year']})"
@@ -51,23 +65,22 @@ def _build_user_prompt(query: str, watched: list[dict], watchlist: list[dict]) -
                 line += f" [{m['genres']}]"
             if m.get("rating"):
                 line += f" ⭐{m['rating']}"
-            watched_lines.append(line)
-        parts.append("Already watched (DO NOT suggest these):\n" + "\n".join(watched_lines))
+            lines.append(line)
+        parts.append("Already watched (DO NOT suggest):\n" + "\n".join(lines))
     else:
         parts.append("Watch history: empty (new group)")
 
     if watchlist:
-        wl_titles = [m["title"] for m in watchlist[:20]]
-        parts.append("Already in watchlist (DO NOT suggest these):\n" + "\n".join(f"- {t}" for t in wl_titles))
+        titles = [m["title"] for m in watchlist[:20]]
+        parts.append("Already in watchlist (DO NOT suggest):\n" + "\n".join(f"- {t}" for t in titles))
 
-    user_request = query if query else "general recommendations based on the watch history"
-    parts.append(f"User request: {user_request}")
+    parts.append(f"User request: {query if query else '(no specific request — recommend based on history)'}")
 
     return "\n\n".join(parts)
 
 
 async def _enrich_with_tmdb(title: str, year: int | None) -> dict | None:
-    """Search TMDB for a movie and return enriched data."""
+    """Search TMDB and return enriched movie data with full details."""
     if not TMDB_API_KEY:
         return None
 
@@ -87,7 +100,6 @@ async def _enrich_with_tmdb(title: str, year: int | None) -> dict | None:
     if not results:
         return None
 
-    # Pick best match: prefer year match + highest vote_count
     candidates = results[:5]
     if year:
         year_matched = [r for r in candidates if r.get("release_date", "")[:4] == str(year)]
@@ -96,7 +108,6 @@ async def _enrich_with_tmdb(title: str, year: int | None) -> dict | None:
 
     movie = max(candidates, key=lambda r: r.get("vote_count", 0))
 
-    # Fetch full movie details for accurate rating
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{TMDB_BASE_URL}/movie/{movie['id']}",
@@ -105,35 +116,36 @@ async def _enrich_with_tmdb(title: str, year: int | None) -> dict | None:
         if resp.status_code == 200:
             movie = resp.json()
 
-    release_year = movie.get("release_date", "")[:4]
     return {
         "tmdb_id": movie["id"],
         "title": movie.get("title", title),
-        "year": release_year,
+        "year": movie.get("release_date", "")[:4],
         "rating": movie.get("vote_average", 0),
         "overview": movie.get("overview", ""),
         "poster_path": movie.get("poster_path", ""),
     }
 
 
-async def get_ai_suggestions(chat_id: int, query: str) -> list[dict]:
+async def get_rec_suggestions(chat_id: int, query: str) -> dict:
     """
-    Generate movie recommendations using Groq AI + TMDB enrichment.
+    Smart recommendations with automatic intent detection.
 
     Args:
         chat_id: Telegram chat ID (for watch history context)
-        query: User's request (mood, genre, description). Can be empty.
+        query: Free-form user request. Can be empty, mood description, or movie name.
 
     Returns:
-        List of movie dicts with tmdb_id, title, year, rating, overview, reason.
-        Empty list on error.
+        {
+            "intent": "similar|mood|history",
+            "source_movie": str | None,
+            "suggestions": list of movie dicts with tmdb data + reason
+        }
     """
     if not GROQ_API_KEY:
-        raise RuntimeError("GROQ_API_KEY not set in environment")
+        raise RuntimeError("GROQ_API_KEY не задан в .env")
 
     watched = get_movies_db(chat_id, status="watched")
     watchlist = get_movies_db(chat_id, status="to_watch")
-
     user_prompt = _build_user_prompt(query, watched, watchlist)
 
     client = AsyncGroq(api_key=GROQ_API_KEY)
@@ -145,52 +157,51 @@ async def get_ai_suggestions(chat_id: int, query: str) -> list[dict]:
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.7,
-            max_tokens=600,
+            max_tokens=800,
         )
     except Exception as e:
         logger.error(f"Groq API error: {e}")
         raise
 
     raw = response.choices[0].message.content.strip()
-    logger.info(f"Groq raw response: {raw[:200]}")
+    logger.info(f"Groq response: {raw[:300]}")
 
-    # Parse JSON from response
     try:
-        # Handle cases where model wraps JSON in ```json ... ```
         if "```" in raw:
             raw = raw.split("```")[1]
             if raw.startswith("json"):
                 raw = raw[4:]
-        suggestions = json.loads(raw)
+        data = json.loads(raw)
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse Groq JSON: {e}\nRaw: {raw}")
-        return []
+        return {"intent": "history", "source_movie": None, "suggestions": []}
 
-    # Enrich each suggestion with TMDB data
-    all_existing_titles = {m["title"].lower() for m in watched + watchlist}
-    results = []
+    intent = data.get("intent", "history")
+    source_movie = data.get("source_movie")
+    raw_suggestions = data.get("suggestions", [])
 
-    for s in suggestions:
-        if not isinstance(s, dict):
-            continue
-        title = s.get("title", "")
-        year = s.get("year")
-        reason = s.get("reason", "")
+    all_existing = {m["title"].lower() for m in watched + watchlist}
+    suggestions = []
 
-        if not title:
+    for s in raw_suggestions:
+        if not isinstance(s, dict) or not s.get("title"):
             continue
 
-        tmdb = await _enrich_with_tmdb(title, year)
+        tmdb = await _enrich_with_tmdb(s["title"], s.get("year"))
         if not tmdb:
-            # Include without TMDB data
-            results.append({"title": title, "year": str(year) if year else "", "reason": reason,
-                            "tmdb_id": None, "rating": 0, "overview": ""})
+            suggestions.append({
+                "title": s["title"],
+                "year": str(s.get("year", "")),
+                "reason": s.get("reason", ""),
+                "tmdb_id": None,
+                "rating": 0,
+                "overview": "",
+            })
             continue
 
-        # Skip if it ended up being something already in the list
-        if tmdb["title"].lower() in all_existing_titles:
+        if tmdb["title"].lower() in all_existing:
             continue
 
-        results.append({**tmdb, "reason": reason})
+        suggestions.append({**tmdb, "reason": s.get("reason", "")})
 
-    return results
+    return {"intent": intent, "source_movie": source_movie, "suggestions": suggestions}

@@ -2,11 +2,10 @@
 """
 Telegram Movie Watchlist Bot
 With TMDB integration, inline buttons, PostgreSQL storage.
-MCP server integration for smart recommendations.
+AI recommendations via Groq (Llama 3.3 70B).
 """
 
 import os
-import sys
 import random
 import logging
 import json
@@ -14,8 +13,6 @@ import asyncio
 from io import BytesIO
 
 from dotenv import load_dotenv
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
 
 load_dotenv()
 
@@ -43,7 +40,7 @@ from bot.tmdb_api import (
     tmdb_get_recommendations, tmdb_discover_by_genres,
     TMDB_API_KEY, TMDB_IMAGE_URL,
 )
-from bot.groq_ai import get_ai_suggestions
+from bot.groq_ai import get_rec_suggestions
 
 # Logging
 logging.basicConfig(
@@ -107,11 +104,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 `/vc` — очистить всю
 
 *Дополнительно:*
-`/suggest` — рекомендации (по истории)
-`/suggest мрачное` — по настроению
-`/similar Inception` — похожие на фильм
-`/ai` — AI-рекомендации (Groq Llama)
-`/ai мрачный триллер` — AI по описанию
+`/rec` — AI-рекомендации по истории группы
+`/rec мрачный триллер` — по настроению
+`/rec как Inception` — похожее на фильм
 `/sync` — синхронизация с TMDB
 `/sync 5` — синхронизировать фильм #5
 `/sync -a` — синхронизировать все
@@ -1336,214 +1331,43 @@ async def random_from_selection(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text(f"🎲 *{chosen['title']}*", parse_mode="Markdown")
 
 
-async def call_mcp_tool(tool_name: str, arguments: dict) -> dict | None:
-    """Call a tool on the TMDB MCP server via stdio."""
-    server_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmdb_mcp_server.py")
-    python_exe = sys.executable
-
-    server_params = StdioServerParameters(
-        command=python_exe,
-        args=[server_script],
-        env={**os.environ},
-    )
-
-    try:
-        async with stdio_client(server_params) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                result = await session.call_tool(tool_name, arguments)
-                if result.content:
-                    return json.loads(result.content[0].text)
-    except Exception as e:
-        logger.error(f"MCP call failed ({tool_name}): {e}")
-    return None
-
-
-async def suggest_movies(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Suggest movies via MCP — supports mood description.
+async def rec_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """AI-powered recommendations — auto-detects intent via Groq (Llama 3.3 70B).
 
     Usage:
-      /suggest                    — by watch history
-      /suggest мрачное но короткое — by mood
-    """
-    chat_id = update.effective_chat.id
-    mood = " ".join(context.args) if context.args else ""
-
-    await update.message.reply_text("🔍 Ищу рекомендации...")
-
-    result = await call_mcp_tool("suggest_movies", {"chat_id": chat_id, "mood": mood})
-
-    if not result or "error" in result:
-        err = result.get("error", "неизвестная ошибка") if result else "MCP сервер недоступен"
-        await update.message.reply_text(f"❌ {err}")
-        return
-
-    suggestions = result.get("suggestions", [])
-    if not suggestions:
-        await update.message.reply_text("❌ Не удалось найти рекомендации")
-        return
-
-    mood_text = result.get("mood", "")
-    genres_text = ", ".join(result.get("matched_genres", []))
-
-    parts = ["🎯 *Рекомендации"]
-    if mood_text and mood_text != "общие рекомендации":
-        parts[0] += f" по запросу «{mood_text}»"
-    parts[0] += ":*"
-    if genres_text:
-        parts.append(f"_Жанры: {genres_text}_\n")
-
-    keyboard = []
-    context.user_data["tmdb_results"] = {}
-
-    for movie in suggestions:
-        tmdb_id = movie["tmdb_id"]
-        title = movie["title"]
-        year = movie.get("year", "")
-        rating = movie.get("rating", 0)
-        reasoning = movie.get("reasoning", "")
-        overview = movie.get("overview", "")
-
-        line = f"• *{title}*"
-        if year:
-            line += f" ({year})"
-        if rating:
-            line += f" ⭐{rating:.1f}"
-        if reasoning:
-            line += f"\n  _{reasoning}_"
-        if overview:
-            short_overview = overview[:120] + "..." if len(overview) > 120 else overview
-            line += f"\n  {short_overview}"
-        parts.append(line)
-
-        # Store minimal TMDB data for add button
-        context.user_data["tmdb_results"][str(tmdb_id)] = {
-            "id": tmdb_id,
-            "title": title,
-            "release_date": f"{year}-01-01" if year else "",
-            "vote_average": rating,
-        }
-        keyboard.append([InlineKeyboardButton(f"➕ {title}", callback_data=f"tmdb_add_{tmdb_id}")])
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("\n".join(parts), parse_mode="Markdown", reply_markup=reply_markup)
-
-
-async def similar_movies(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Find movies similar to a given title, excluding current watchlist.
-
-    Usage: /similar Inception
-    """
-    chat_id = update.effective_chat.id
-
-    if not context.args:
-        await update.message.reply_text(
-            "❌ Укажи название фильма:\n`/similar Inception`\n`/similar Начало`",
-            parse_mode="Markdown",
-        )
-        return
-
-    movie_title = " ".join(context.args)
-    await update.message.reply_text(f"🔍 Ищу похожее на *{movie_title}*...", parse_mode="Markdown")
-
-    result = await call_mcp_tool("find_similar", {"chat_id": chat_id, "movie_title": movie_title})
-
-    if not result or "error" in result:
-        err = result.get("error", "неизвестная ошибка") if result else "MCP сервер недоступен"
-        await update.message.reply_text(f"❌ {err}")
-        return
-
-    source = result.get("source", {})
-    similar = result.get("similar", [])
-    filtered_out = result.get("filtered_out", 0)
-
-    if not similar:
-        await update.message.reply_text(
-            f"❌ Не нашёл похожих фильмов на *{source.get('title', movie_title)}*",
-            parse_mode="Markdown",
-        )
-        return
-
-    source_title = source.get("title", movie_title)
-    source_year = source.get("year", "")
-    header = f"🎬 *Похожее на {source_title}"
-    if source_year:
-        header += f" ({source_year})"
-    header += ":*"
-    if filtered_out:
-        header += f"\n_Исключено из вашего списка: {filtered_out} фильмов_"
-
-    parts = [header, ""]
-
-    keyboard = []
-    context.user_data["tmdb_results"] = {}
-
-    for movie in similar:
-        tmdb_id = movie["tmdb_id"]
-        title = movie["title"]
-        year = movie.get("year", "")
-        rating = movie.get("rating", 0)
-        genres = movie.get("genres", "")
-        overview = movie.get("overview", "")
-        note = movie.get("note", "")
-
-        line = f"• *{title}*"
-        if year:
-            line += f" ({year})"
-        if rating:
-            line += f" ⭐{rating:.1f}"
-        if genres:
-            line += f"\n  _{genres}_"
-        if overview:
-            short = overview[:120] + "..." if len(overview) > 120 else overview
-            line += f"\n  {short}"
-        if note:
-            line += f"\n  ⚡ {note}"
-        parts.append(line)
-
-        context.user_data["tmdb_results"][str(tmdb_id)] = {
-            "id": tmdb_id,
-            "title": title,
-            "release_date": f"{year}-01-01" if year else "",
-            "vote_average": rating,
-        }
-        keyboard.append([InlineKeyboardButton(f"➕ {title}", callback_data=f"tmdb_add_{tmdb_id}")])
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("\n".join(parts), parse_mode="Markdown", reply_markup=reply_markup)
-
-
-async def ai_suggest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """AI-powered movie recommendations via Groq (Llama 3.1 70B).
-
-    Usage:
-      /ai                          — recommendations based on watch history
-      /ai мрачный психологический  — by mood/description
-      /ai sci-fi с хорошим сюжетом — any free-form query
+      /rec                    — by watch history
+      /rec мрачный триллер    — by mood/vibe
+      /rec как Inception      — similar to a movie
     """
     chat_id = update.effective_chat.id
     query = " ".join(context.args) if context.args else ""
 
-    await update.message.reply_text("🤖 Думаю над рекомендациями...")
+    await update.message.reply_text("🤖 Подбираю рекомендации...")
 
     try:
-        suggestions = await get_ai_suggestions(chat_id, query)
+        result = await get_rec_suggestions(chat_id, query)
     except RuntimeError as e:
         await update.message.reply_text(f"❌ {e}")
         return
     except Exception as e:
-        logger.error(f"AI suggest error: {e}")
+        logger.error(f"rec_command error: {e}")
         await update.message.reply_text("❌ Ошибка при обращении к AI. Попробуй позже.")
         return
 
+    suggestions = result.get("suggestions", [])
     if not suggestions:
         await update.message.reply_text("❌ AI не смог подобрать рекомендации. Попробуй другой запрос.")
         return
 
-    header = "🤖 *AI-рекомендации"
-    if query:
-        header += f" по запросу «{query}»"
-    header += ":*"
+    intent = result.get("intent", "history")
+    source_movie = result.get("source_movie")
+
+    if intent == "similar" and source_movie:
+        header = f"🎬 *Похожее на {source_movie}:*"
+    elif intent == "mood" and query:
+        header = f"🎯 *Рекомендации по запросу «{query}»:*"
+    else:
+        header = "🤖 *Рекомендации на основе истории группы:*"
 
     parts = [header, ""]
     keyboard = []
@@ -2297,9 +2121,7 @@ def main() -> None:
     application.add_handler(CommandHandler("poll", create_poll))
     application.add_handler(CommandHandler("vote", vote_poll))
     application.add_handler(CommandHandler("rpoll", random_from_selection))
-    application.add_handler(CommandHandler("suggest", suggest_movies))
-    application.add_handler(CommandHandler("similar", similar_movies))
-    application.add_handler(CommandHandler("ai", ai_suggest))
+    application.add_handler(CommandHandler("rec", rec_command))
     application.add_handler(CommandHandler("sync", sync_command))
     application.add_handler(CommandHandler("export", export_list))
     

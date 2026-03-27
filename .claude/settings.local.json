@@ -13,7 +13,9 @@
       "Bash(timeout 5 python tmdb_mcp_server.py)",
       "Bash(python -:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(python -c \":*)",
+      "Bash(python -c \"import movie_watchlist_bot; print\\(''OK''\\)\")"
     ]
   }
 }
