@@ -31,12 +31,40 @@ DATABASE_URL=postgresql://daniiar.erkinov@localhost:5432/movie_bot
 
 ## Архитектура
 
+### Текущая структура модулей
+
 ```
-movie_watchlist_bot.py   — основной бот (Telegram handlers, DB, TMDB)
-tmdb_mcp_server.py       — MCP сервер с инструментами recommend/similar
-run.sh                   — скрипт запуска
-venv/                    — виртуальное окружение Python
-.env                     — секреты (в gitignore)
+bot/
+├── __init__.py
+├── db.py              — весь слой PostgreSQL (22 функции: movies CRUD + vote basket)
+└── tmdb_api.py        — TMDB HTTP запросы (5 функций + константы TMDB_API_KEY, TMDB_BASE_URL)
+
+movie_watchlist_bot.py  — Telegram handlers, callbacks, UI-хелперы, main()
+tmdb_mcp_server.py      — MCP сервер с инструментами suggest/similar
+run.sh                  — скрипт запуска
+venv/                   — виртуальное окружение Python
+.env                    — секреты (в gitignore)
+```
+
+### Целевая структура (TODO для дальнейшего рефакторинга)
+
+```
+bot/
+├── __init__.py
+├── db.py              ✅ готово
+├── tmdb_api.py        ✅ готово
+├── utils.py           📋 TODO — format_movie, call_mcp_tool
+├── ui_helpers.py      📋 TODO — show_page, show_movie_detail, show_tmdb_results и др. (8 функций)
+└── handlers/
+    ├── __init__.py
+    ├── basic.py       📋 TODO — /add, /list, /pages, /wlist, /info, /random
+    ├── movie_actions.py 📋 TODO — /watched, /remove, /rename, /export
+    ├── polling.py     📋 TODO — /poll, /vote, /rpoll
+    ├── basket.py      📋 TODO — /v+, /v-, /vmy, /vlist, /go, /vrand, /vc
+    ├── ai_features.py 📋 TODO — /suggest, /similar (MCP)
+    └── sync.py        📋 TODO — /sync и его колбэки
+
+movie_watchlist_bot.py  — после полного рефакторинга: только main() + регистрация хэндлеров
 ```
 
 ### MCP сервер
