@@ -8,6 +8,7 @@ Telegram бот для группового управления вотчлис�
 - **PostgreSQL** (локально на MacBook, база `movie_bot`)
 - **TMDB API** — поиск, обогащение данных, рекомендации
 - **Groq API** (`bot/groq_ai.py`) — AI-рекомендации через Llama 3.3 70B (команда `/rec`)
+- **FastAPI** (`api.py`) — REST API поверх той же БД, для iOS приложения
 
 ## Запуск
 
@@ -20,6 +21,17 @@ Telegram бот для группового управления вотчлис�
 source venv/bin/activate
 python movie_watchlist_bot.py
 ```
+
+### FastAPI сервер (для iOS)
+
+```bash
+source venv/bin/activate
+uvicorn api:app --reload --port 8000
+```
+
+Документация доступна по адресу: **http://localhost:8000/docs**
+
+Бот и API можно запускать одновременно — оба работают с одной БД.
 
 ## Переменные окружения (`.env`, не в git)
 
@@ -42,7 +54,8 @@ bot/
 └── groq_ai.py         — Groq AI: get_rec_suggestions() — авто-определяет intent (similar/mood/history)
 
 movie_watchlist_bot.py  — Telegram handlers, callbacks, UI-хелперы, main()
-run.sh                  — скрипт запуска
+api.py                  — FastAPI REST API для iOS приложения
+run.sh                  — скрипт запуска бота
 venv/                   — виртуальное окружение Python
 .env                    — секреты (в gitignore)
 ```
@@ -114,9 +127,35 @@ movie_watchlist_bot.py  — после полного рефакторинга: 
 | `/export` | экспорт в .txt или .csv |
 | `/v+ 1,5` `/v-` `/go` | корзина голосования |
 
+## FastAPI (`api.py`)
+
+REST API поверх `bot/db.py` для iOS приложения. Запускается отдельно от бота.
+
+### Endpoints
+
+| метод | путь | описание |
+|-------|------|----------|
+| `GET` | `/movies?chat_id=X` | все фильмы чата |
+| `GET` | `/movies?chat_id=X&status=to_watch` | только вотчлист |
+| `GET` | `/movies?chat_id=X&status=watched` | только просмотренные |
+| `GET` | `/movies/{id}?chat_id=X` | один фильм |
+| `POST` | `/movies` | добавить фильм |
+| `PATCH` | `/movies/{id}/watched` | отметить просмотренным |
+| `PATCH` | `/movies/{id}/unwatch` | вернуть в вотчлист |
+| `PATCH` | `/movies/{id}/rename` | переименовать |
+| `DELETE` | `/movies/{id}?chat_id=X` | удалить |
+| `GET` | `/stats?chat_id=X` | счётчики to_watch / watched |
+| `GET` | `/search?q=Inception` | поиск через TMDB |
+| `GET` | `/recommendations?chat_id=X&q=` | AI рекомендации (Groq) |
+
+### Архитектура
+
+`api.py` импортирует функции напрямую из `bot/db.py` и `bot/tmdb_api.py` — никакого дублирования кода.
+CORS открыт для всех origins (локальная разработка). При деплое ограничить до iOS app domain.
+
 ## Известные нюансы
 
 - `init_db()` использует `SAVEPOINT` для миграций (не `rollback`) — иначе `rollback` откатывал бы и `CREATE TABLE`
-- MCP сервер читает `.env` через `python-dotenv` — нужно запускать из папки проекта
 - При поиске TMDB: сначала ru-RU, если < 5 результатов — добавляет en-US, дедупликация по tmdb_id
 - История: был на Railway PostgreSQL, переехали на локальный Mac. В будущем — свой сервер
+- FastAPI вызывает `init_db()` при старте через `lifespan` — таблицы создаются автоматически
