@@ -1044,6 +1044,29 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         InlineKeyboardButton("✅ Просмотрено", callback_data=f"w_{movie['id']}"),
         InlineKeyboardButton("🗑 Удалить", callback_data=f"d_{movie['id']}")
     ]]
+
+    # External links
+    if movie.get("tmdb_id"):
+        tmdb_id = movie["tmdb_id"]
+        link_row = [InlineKeyboardButton("TMDB", url=f"https://www.themoviedb.org/movie/{tmdb_id}")]
+
+        # Fetch IMDB ID from TMDB
+        try:
+            async with __import__("httpx").AsyncClient() as client:
+                resp = await client.get(
+                    f"https://api.themoviedb.org/3/movie/{tmdb_id}/external_ids",
+                    params={"api_key": TMDB_API_KEY},
+                )
+                if resp.status_code == 200:
+                    imdb_id = resp.json().get("imdb_id")
+                    if imdb_id:
+                        link_row.append(InlineKeyboardButton("IMDB", url=f"https://www.imdb.com/title/{imdb_id}/"))
+        except Exception:
+            pass
+
+        kp_query = movie["title"].replace(" ", "+")
+        link_row.append(InlineKeyboardButton("Кинопоиск", url=f"https://www.kinopoisk.ru/index.php?kp_query={kp_query}"))
+        keyboard.append(link_row)
     
     # Show poster if available
     if movie.get("poster_path") and TMDB_API_KEY:
