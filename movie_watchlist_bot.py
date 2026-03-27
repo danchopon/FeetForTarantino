@@ -2,18 +2,26 @@
 """
 Telegram Movie Watchlist Bot
 With TMDB integration, inline buttons, PostgreSQL storage.
+MCP server integration for smart recommendations.
 """
 
 import os
+import sys
 import random
 import logging
 import json
+import asyncio
 from datetime import datetime
 from io import BytesIO
 
 import httpx
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from dotenv import load_dotenv
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+load_dotenv()
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -96,14 +104,19 @@ def init_db():
         ON vote_basket(chat_id)
     """)
     
+    conn.commit()
+
     # Add new columns if they don't exist (migration)
-    for col, col_type in [("tmdb_id", "INT"), ("year", "INT"), ("rating", "REAL"), 
+    # Each ALTER uses a SAVEPOINT so a DuplicateColumn error doesn't abort the whole transaction
+    for col, col_type in [("tmdb_id", "INT"), ("year", "INT"), ("rating", "REAL"),
                           ("poster_path", "VARCHAR(255)"), ("genres", "TEXT")]:
         try:
+            cur.execute("SAVEPOINT before_alter")
             cur.execute(f"ALTER TABLE movies ADD COLUMN {col} {col_type}")
+            cur.execute("RELEASE SAVEPOINT before_alter")
         except psycopg2.errors.DuplicateColumn:
-            conn.rollback()
-    
+            cur.execute("ROLLBACK TO SAVEPOINT before_alter")
+
     conn.commit()
     cur.close()
     conn.close()
@@ -698,7 +711,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 `/vc` — очистить всю
 
 *Дополнительно:*
-`/suggest` — рекомендации
+`/suggest` — рекомендации (по истории)
+`/suggest мрачное` — по настроению
+`/similar Inception` — похожие на фильм
 `/sync` — синхронизация с TMDB
 `/sync 5` — синхронизировать фильм #5
 `/sync -a` — синхронизировать все
@@ -1900,52 +1915,179 @@ async def random_from_selection(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text(f"🎲 *{chosen['title']}*", parse_mode="Markdown")
 
 
+async def call_mcp_tool(tool_name: str, arguments: dict) -> dict | None:
+    """Call a tool on the TMDB MCP server via stdio."""
+    server_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmdb_mcp_server.py")
+    python_exe = sys.executable
+
+    server_params = StdioServerParameters(
+        command=python_exe,
+        args=[server_script],
+        env={**os.environ},
+    )
+
+    try:
+        async with stdio_client(server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool(tool_name, arguments)
+                if result.content:
+                    return json.loads(result.content[0].text)
+    except Exception as e:
+        logger.error(f"MCP call failed ({tool_name}): {e}")
+    return None
+
+
 async def suggest_movies(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Suggest movies based on watched genres."""
+    """Suggest movies via MCP — supports mood description.
+
+    Usage:
+      /suggest                    — by watch history
+      /suggest мрачное но короткое — by mood
+    """
     chat_id = update.effective_chat.id
-    
-    if not TMDB_API_KEY:
-        await update.message.reply_text("❌ TMDB не настроен")
+    mood = " ".join(context.args) if context.args else ""
+
+    await update.message.reply_text("🔍 Ищу рекомендации...")
+
+    result = await call_mcp_tool("suggest_movies", {"chat_id": chat_id, "mood": mood})
+
+    if not result or "error" in result:
+        err = result.get("error", "неизвестная ошибка") if result else "MCP сервер недоступен"
+        await update.message.reply_text(f"❌ {err}")
         return
-    
-    # Get watched genres
-    genres = get_watched_genres(chat_id)
-    
-    if not genres:
-        await update.message.reply_text("❌ Нужно сначала посмотреть фильмы с TMDB данными для рекомендаций")
-        return
-    
-    # Get already known movies to exclude
-    exclude_ids = get_watched_tmdb_ids(chat_id)
-    
-    # Discover movies by genres
-    recommendations = await tmdb_discover_by_genres(genres, exclude_ids)
-    
-    if not recommendations:
+
+    suggestions = result.get("suggestions", [])
+    if not suggestions:
         await update.message.reply_text("❌ Не удалось найти рекомендации")
         return
-    
-    parts = ["🎯 *Рекомендации по твоим вкусам:*\n"]
-    
+
+    mood_text = result.get("mood", "")
+    genres_text = ", ".join(result.get("matched_genres", []))
+
+    parts = ["🎯 *Рекомендации"]
+    if mood_text and mood_text != "общие рекомендации":
+        parts[0] += f" по запросу «{mood_text}»"
+    parts[0] += ":*"
+    if genres_text:
+        parts.append(f"_Жанры: {genres_text}_\n")
+
     keyboard = []
     context.user_data["tmdb_results"] = {}
-    
-    for movie in recommendations[:5]:
-        year = movie.get("release_date", "")[:4]
-        rating = movie.get("vote_average", 0)
-        title = movie.get("title", "Unknown")
-        
+
+    for movie in suggestions:
+        tmdb_id = movie["tmdb_id"]
+        title = movie["title"]
+        year = movie.get("year", "")
+        rating = movie.get("rating", 0)
+        reasoning = movie.get("reasoning", "")
+        overview = movie.get("overview", "")
+
         line = f"• *{title}*"
         if year:
             line += f" ({year})"
         if rating:
             line += f" ⭐{rating:.1f}"
+        if reasoning:
+            line += f"\n  _{reasoning}_"
+        if overview:
+            short_overview = overview[:120] + "..." if len(overview) > 120 else overview
+            line += f"\n  {short_overview}"
         parts.append(line)
-        
-        # Add button to add movie
-        context.user_data["tmdb_results"][str(movie['id'])] = movie
-        keyboard.append([InlineKeyboardButton(f"➕ {title}", callback_data=f"tmdb_add_{movie['id']}")])
-    
+
+        # Store minimal TMDB data for add button
+        context.user_data["tmdb_results"][str(tmdb_id)] = {
+            "id": tmdb_id,
+            "title": title,
+            "release_date": f"{year}-01-01" if year else "",
+            "vote_average": rating,
+        }
+        keyboard.append([InlineKeyboardButton(f"➕ {title}", callback_data=f"tmdb_add_{tmdb_id}")])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("\n".join(parts), parse_mode="Markdown", reply_markup=reply_markup)
+
+
+async def similar_movies(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Find movies similar to a given title, excluding current watchlist.
+
+    Usage: /similar Inception
+    """
+    chat_id = update.effective_chat.id
+
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Укажи название фильма:\n`/similar Inception`\n`/similar Начало`",
+            parse_mode="Markdown",
+        )
+        return
+
+    movie_title = " ".join(context.args)
+    await update.message.reply_text(f"🔍 Ищу похожее на *{movie_title}*...", parse_mode="Markdown")
+
+    result = await call_mcp_tool("find_similar", {"chat_id": chat_id, "movie_title": movie_title})
+
+    if not result or "error" in result:
+        err = result.get("error", "неизвестная ошибка") if result else "MCP сервер недоступен"
+        await update.message.reply_text(f"❌ {err}")
+        return
+
+    source = result.get("source", {})
+    similar = result.get("similar", [])
+    filtered_out = result.get("filtered_out", 0)
+
+    if not similar:
+        await update.message.reply_text(
+            f"❌ Не нашёл похожих фильмов на *{source.get('title', movie_title)}*",
+            parse_mode="Markdown",
+        )
+        return
+
+    source_title = source.get("title", movie_title)
+    source_year = source.get("year", "")
+    header = f"🎬 *Похожее на {source_title}"
+    if source_year:
+        header += f" ({source_year})"
+    header += ":*"
+    if filtered_out:
+        header += f"\n_Исключено из вашего списка: {filtered_out} фильмов_"
+
+    parts = [header, ""]
+
+    keyboard = []
+    context.user_data["tmdb_results"] = {}
+
+    for movie in similar:
+        tmdb_id = movie["tmdb_id"]
+        title = movie["title"]
+        year = movie.get("year", "")
+        rating = movie.get("rating", 0)
+        genres = movie.get("genres", "")
+        overview = movie.get("overview", "")
+        note = movie.get("note", "")
+
+        line = f"• *{title}*"
+        if year:
+            line += f" ({year})"
+        if rating:
+            line += f" ⭐{rating:.1f}"
+        if genres:
+            line += f"\n  _{genres}_"
+        if overview:
+            short = overview[:120] + "..." if len(overview) > 120 else overview
+            line += f"\n  {short}"
+        if note:
+            line += f"\n  ⚡ {note}"
+        parts.append(line)
+
+        context.user_data["tmdb_results"][str(tmdb_id)] = {
+            "id": tmdb_id,
+            "title": title,
+            "release_date": f"{year}-01-01" if year else "",
+            "vote_average": rating,
+        }
+        keyboard.append([InlineKeyboardButton(f"➕ {title}", callback_data=f"tmdb_add_{tmdb_id}")])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("\n".join(parts), parse_mode="Markdown", reply_markup=reply_markup)
 
@@ -2666,6 +2808,7 @@ def main() -> None:
     application.add_handler(CommandHandler("vote", vote_poll))
     application.add_handler(CommandHandler("rpoll", random_from_selection))
     application.add_handler(CommandHandler("suggest", suggest_movies))
+    application.add_handler(CommandHandler("similar", similar_movies))
     application.add_handler(CommandHandler("sync", sync_command))
     application.add_handler(CommandHandler("export", export_list))
     
