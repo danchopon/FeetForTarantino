@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pg_isready)",
+      "Bash(pip3 show:*)",
+      "Bash(pip3 install:*)",
+      "Bash(pip3 list:*)",
+      "Bash(python3 -m venv venv)",
+      "Bash(source venv/bin/activate)",
+      "Bash(pip install:*)",
+      "Bash(python -c \"import movie_watchlist_bot\")",
+      "Bash(python -c \"import tmdb_mcp_server; print\\(''MCP server OK''\\)\")",
+      "Bash(timeout 5 python tmdb_mcp_server.py)",
+      "Bash(python -:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
+    ]
+  }
+}
