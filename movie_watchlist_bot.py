@@ -43,6 +43,7 @@ from bot.tmdb_api import (
     tmdb_get_recommendations, tmdb_discover_by_genres,
     TMDB_API_KEY, TMDB_IMAGE_URL,
 )
+from bot.groq_ai import get_ai_suggestions
 
 # Logging
 logging.basicConfig(
@@ -109,6 +110,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 `/suggest` — рекомендации (по истории)
 `/suggest мрачное` — по настроению
 `/similar Inception` — похожие на фильм
+`/ai` — AI-рекомендации (Groq Llama)
+`/ai мрачный триллер` — AI по описанию
 `/sync` — синхронизация с TMDB
 `/sync 5` — синхронизировать фильм #5
 `/sync -a` — синхронизировать все
@@ -1487,6 +1490,75 @@ async def similar_movies(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text("\n".join(parts), parse_mode="Markdown", reply_markup=reply_markup)
 
 
+async def ai_suggest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """AI-powered movie recommendations via Groq (Llama 3.1 70B).
+
+    Usage:
+      /ai                          — recommendations based on watch history
+      /ai мрачный психологический  — by mood/description
+      /ai sci-fi с хорошим сюжетом — any free-form query
+    """
+    chat_id = update.effective_chat.id
+    query = " ".join(context.args) if context.args else ""
+
+    await update.message.reply_text("🤖 Думаю над рекомендациями...")
+
+    try:
+        suggestions = await get_ai_suggestions(chat_id, query)
+    except RuntimeError as e:
+        await update.message.reply_text(f"❌ {e}")
+        return
+    except Exception as e:
+        logger.error(f"AI suggest error: {e}")
+        await update.message.reply_text("❌ Ошибка при обращении к AI. Попробуй позже.")
+        return
+
+    if not suggestions:
+        await update.message.reply_text("❌ AI не смог подобрать рекомендации. Попробуй другой запрос.")
+        return
+
+    header = "🤖 *AI-рекомендации"
+    if query:
+        header += f" по запросу «{query}»"
+    header += ":*"
+
+    parts = [header, ""]
+    keyboard = []
+    context.user_data["tmdb_results"] = {}
+
+    for movie in suggestions:
+        tmdb_id = movie.get("tmdb_id")
+        title = movie["title"]
+        year = movie.get("year", "")
+        rating = movie.get("rating", 0)
+        reason = movie.get("reason", "")
+        overview = movie.get("overview", "")
+
+        line = f"• *{title}*"
+        if year:
+            line += f" ({year})"
+        if rating:
+            line += f" ⭐{rating:.1f}"
+        if reason:
+            line += f"\n  _{reason}_"
+        if overview:
+            short = overview[:120] + "..." if len(overview) > 120 else overview
+            line += f"\n  {short}"
+        parts.append(line)
+
+        if tmdb_id:
+            context.user_data["tmdb_results"][str(tmdb_id)] = {
+                "id": tmdb_id,
+                "title": title,
+                "release_date": f"{year}-01-01" if year else "",
+                "vote_average": rating,
+            }
+            keyboard.append([InlineKeyboardButton(f"➕ {title}", callback_data=f"tmdb_add_{tmdb_id}")])
+
+    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+    await update.message.reply_text("\n".join(parts), parse_mode="Markdown", reply_markup=reply_markup)
+
+
 async def wlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show watched movies with pagination."""
     chat_id = update.effective_chat.id
@@ -2204,6 +2276,7 @@ def main() -> None:
     application.add_handler(CommandHandler("rpoll", random_from_selection))
     application.add_handler(CommandHandler("suggest", suggest_movies))
     application.add_handler(CommandHandler("similar", similar_movies))
+    application.add_handler(CommandHandler("ai", ai_suggest))
     application.add_handler(CommandHandler("sync", sync_command))
     application.add_handler(CommandHandler("export", export_list))
     

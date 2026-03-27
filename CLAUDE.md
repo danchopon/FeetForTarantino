@@ -8,6 +8,7 @@ Telegram бот для группового управления вотчлис�
 - **PostgreSQL** (локально на MacBook, база `movie_bot`)
 - **TMDB API** — поиск, обогащение данных, рекомендации
 - **MCP сервер** (`tmdb_mcp_server.py`) — умные рекомендации через Model Context Protocol
+- **Groq API** (`bot/groq_ai.py`) — AI-рекомендации через Llama 3.3 70B (команда `/ai`)
 
 ## Запуск
 
@@ -27,6 +28,7 @@ python movie_watchlist_bot.py
 TELEGRAM_BOT_TOKEN=...
 TMDB_API_KEY=...
 DATABASE_URL=postgresql://daniiar.erkinov@localhost:5432/movie_bot
+GROQ_API_KEY=...
 ```
 
 ## Архитектура
@@ -37,7 +39,8 @@ DATABASE_URL=postgresql://daniiar.erkinov@localhost:5432/movie_bot
 bot/
 ├── __init__.py
 ├── db.py              — весь слой PostgreSQL (22 функции: movies CRUD + vote basket)
-└── tmdb_api.py        — TMDB HTTP запросы (5 функций + константы TMDB_API_KEY, TMDB_BASE_URL)
+├── tmdb_api.py        — TMDB HTTP запросы (5 функций + константы TMDB_API_KEY, TMDB_BASE_URL)
+└── groq_ai.py         — Groq AI интеграция: get_ai_suggestions() → Llama 3.3 70B + TMDB обогащение
 
 movie_watchlist_bot.py  — Telegram handlers, callbacks, UI-хелперы, main()
 tmdb_mcp_server.py      — MCP сервер с инструментами suggest/similar
@@ -61,7 +64,7 @@ bot/
     ├── movie_actions.py 📋 TODO — /watched, /remove, /rename, /export
     ├── polling.py     📋 TODO — /poll, /vote, /rpoll
     ├── basket.py      📋 TODO — /v+, /v-, /vmy, /vlist, /go, /vrand, /vc
-    ├── ai_features.py 📋 TODO — /suggest, /similar (MCP)
+    ├── ai_features.py 📋 TODO — /suggest, /similar (MCP), /ai (Groq)
     └── sync.py        📋 TODO — /sync и его колбэки
 
 movie_watchlist_bot.py  — после полного рефакторинга: только main() + регистрация хэндлеров
@@ -73,6 +76,15 @@ movie_watchlist_bot.py  — после полного рефакторинга: 
 Инструменты:
 - `suggest_movies(chat_id, mood)` — рекомендации по настроению + история просмотров группы
 - `find_similar(chat_id, movie_title)` — похожие фильмы, без уже добавленных
+
+### Groq AI модуль (`bot/groq_ai.py`)
+
+Прямой вызов Groq API (без MCP). Используется командой `/ai`.
+- Модель: `llama-3.3-70b-versatile`
+- Получает историю просмотров и вотчлист из БД, передаёт как контекст в LLM
+- LLM возвращает JSON с 3 рекомендациями + объяснение на русском
+- Каждый результат обогащается актуальными данными из TMDB (рейтинг, описание, tmdb_id)
+- Переменная окружения: `GROQ_API_KEY`
 
 ### База данных
 
@@ -106,6 +118,7 @@ movie_watchlist_bot.py  — после полного рефакторинга: 
 | `/poll N` | Telegram poll из N случайных |
 | `/suggest [настроение]` | умные рекомендации через MCP |
 | `/similar Название` | похожие фильмы через MCP |
+| `/ai [запрос]` | AI-рекомендации через Groq (Llama 3.3 70B) |
 | `/sync` | синхронизировать данные с TMDB |
 | `/export` | экспорт в .txt или .csv |
 | `/v+ 1,5` `/v-` `/go` | корзина голосования |
