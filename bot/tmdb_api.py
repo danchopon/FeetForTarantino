@@ -116,6 +116,24 @@ async def tmdb_get_movie(tmdb_id: int) -> dict | None:
     return None
 
 
+async def tmdb_get_credits(tmdb_id: int) -> str | None:
+    """Return the first director name from TMDB credits, or None."""
+    if not TMDB_API_KEY:
+        return None
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{TMDB_BASE_URL}/movie/{tmdb_id}/credits",
+            params={"api_key": TMDB_API_KEY},
+        )
+        if resp.status_code == 200:
+            crew = resp.json().get("crew", [])
+            for member in crew:
+                if member.get("job") == "Director":
+                    return member.get("name")
+    return None
+
+
 async def tmdb_get_recommendations(tmdb_id: int) -> list[dict]:
     """Get movie recommendations from TMDB."""
     if not TMDB_API_KEY:

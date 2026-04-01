@@ -29,7 +29,7 @@ from bot.db import (
     remove_movie_by_id,
     rename_movie_by_id,
 )
-from bot.tmdb_api import tmdb_search, parse_movie_query
+from bot.tmdb_api import tmdb_search, parse_movie_query, tmdb_get_movie, tmdb_get_credits
 from bot.groq_ai import get_rec_suggestions
 
 
@@ -84,6 +84,9 @@ class AddMovieRequest(BaseModel):
     rating: Optional[float] = Field(None, description="TMDB vote average (0–10)", json_schema_extra={"example": 8.4})
     poster_path: Optional[str] = Field(None, description="TMDB poster path, e.g. /abc123.jpg", json_schema_extra={"example": "/oYuLEt3zVCKq57qu2F8dT7NIa6f.jpg"})
     genres: Optional[str] = Field(None, description="Comma-separated TMDB genre IDs", json_schema_extra={"example": "28,12,878"})
+    overview: Optional[str] = Field(None, description="Movie synopsis")
+    runtime: Optional[int] = Field(None, description="Duration in minutes", json_schema_extra={"example": 148})
+    director: Optional[str] = Field(None, description="Director name", json_schema_extra={"example": "Christopher Nolan"})
 
 
 class RenameMovieRequest(BaseModel):
@@ -108,6 +111,9 @@ class MovieResponse(BaseModel):
     rating: Optional[float] = None
     poster_path: Optional[str] = Field(None, description="Append to https://image.tmdb.org/t/p/w500")
     genres: Optional[str] = Field(None, description="Comma-separated TMDB genre IDs, e.g. '28,12,878'")
+    overview: Optional[str] = None
+    runtime: Optional[int] = Field(None, description="Duration in minutes")
+    director: Optional[str] = Field(None, description="Director name")
 
 
 class StatsResponse(BaseModel):
@@ -155,6 +161,18 @@ class StatusResponse(BaseModel):
 class RenameResponse(BaseModel):
     old_title: str
     new_title: str
+
+
+# ── internal helpers ─────────────────────────────────────────────────────────
+
+async def _fetch_tmdb_extras(tmdb_id: int) -> tuple[dict | None, str | None]:
+    """Fetch movie details and director from TMDB in parallel."""
+    import asyncio
+    details, director = await asyncio.gather(
+        tmdb_get_movie(tmdb_id),
+        tmdb_get_credits(tmdb_id),
+    )
+    return details, director
 
 
 # ── movies ────────────────────────────────────────────────────────────────────
@@ -213,8 +231,25 @@ async def add_movie(body: AddMovieRequest):
     Only `chat_id` and `title` are required. Provide TMDB fields for richer data
     (use `GET /search` to find them).
 
+    When `tmdb_id` is supplied, `overview`, `runtime`, and `director` are fetched
+    automatically from TMDB if not already provided in the request body.
+
     Returns **409** if the movie title already exists for this chat.
     """
+    overview = body.overview
+    runtime = body.runtime
+    director = body.director
+
+    if body.tmdb_id and (overview is None or runtime is None or director is None):
+        details, credits_director = await _fetch_tmdb_extras(body.tmdb_id)
+        if details:
+            if overview is None:
+                overview = details.get("overview") or None
+            if runtime is None:
+                runtime = details.get("runtime") or None
+        if director is None:
+            director = credits_director
+
     success, status = add_movie_db(
         chat_id=body.chat_id,
         title=body.title,
@@ -224,6 +259,9 @@ async def add_movie(body: AddMovieRequest):
         rating=body.rating,
         poster_path=body.poster_path,
         genres=body.genres,
+        overview=overview,
+        runtime=runtime,
+        director=director,
     )
     if not success:
         raise HTTPException(

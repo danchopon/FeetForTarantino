@@ -35,7 +35,10 @@ def init_db():
             year INT,
             rating REAL,
             poster_path VARCHAR(255),
-            genres TEXT
+            genres TEXT,
+            overview TEXT,
+            runtime INT,
+            director VARCHAR(255)
         )
     """)
 
@@ -72,7 +75,8 @@ def init_db():
     # Add new columns if they don't exist (migration)
     # Each ALTER uses a SAVEPOINT so a DuplicateColumn error doesn't abort the whole transaction
     for col, col_type in [("tmdb_id", "INT"), ("year", "INT"), ("rating", "REAL"),
-                          ("poster_path", "VARCHAR(255)"), ("genres", "TEXT")]:
+                          ("poster_path", "VARCHAR(255)"), ("genres", "TEXT"),
+                          ("overview", "TEXT"), ("runtime", "INT"), ("director", "VARCHAR(255)")]:
         try:
             cur.execute("SAVEPOINT before_alter")
             cur.execute(f"ALTER TABLE movies ADD COLUMN {col} {col_type}")
@@ -90,15 +94,18 @@ def init_db():
 
 def add_movie_db(chat_id: int, title: str, added_by: str,
                  tmdb_id: int = None, year: int = None, rating: float = None,
-                 poster_path: str = None, genres: str = None) -> tuple[bool, str]:
+                 poster_path: str = None, genres: str = None,
+                 overview: str = None, runtime: int = None, director: str = None) -> tuple[bool, str]:
     conn = get_db_connection()
     cur = conn.cursor()
 
     try:
         cur.execute(
-            """INSERT INTO movies (chat_id, title, added_by, tmdb_id, year, rating, poster_path, genres)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-            (chat_id, title, added_by, tmdb_id, year, rating, poster_path, genres)
+            """INSERT INTO movies (chat_id, title, added_by, tmdb_id, year, rating, poster_path, genres,
+                                   overview, runtime, director)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (chat_id, title, added_by, tmdb_id, year, rating, poster_path, genres,
+             overview, runtime, director)
         )
         conn.commit()
         return True, "added"
