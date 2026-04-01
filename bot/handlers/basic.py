@@ -526,7 +526,7 @@ async def app_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         chat_name = update.effective_user.first_name
 
     encoded_name = quote(chat_name)
-    deep_link = f"feetfortarantino://chat?id={chat_id}&name={encoded_name}"
+    deep_link = f"https://danchopon.github.io/feetfortarantino/chat?id={chat_id}&name={encoded_name}"
 
     keyboard = [[InlineKeyboardButton("📱 Открыть в приложении", url=deep_link)]]
     await update.message.reply_text(
