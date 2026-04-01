@@ -44,41 +44,30 @@ GROQ_API_KEY=...
 
 ## Архитектура
 
-### Текущая структура модулей
+### Структура модулей
 
 ```
 bot/
 ├── __init__.py
-├── db.py              — весь слой PostgreSQL (22 функции: movies CRUD + vote basket)
+├── db.py              — слой PostgreSQL (22 функции: movies CRUD + vote basket)
 ├── tmdb_api.py        — TMDB HTTP запросы (5 функций + константы TMDB_API_KEY, TMDB_BASE_URL)
-└── groq_ai.py         — Groq AI: get_rec_suggestions() — авто-определяет intent (similar/mood/history)
+├── groq_ai.py         — Groq AI: get_rec_suggestions() — авто-определяет intent (similar/mood/history)
+├── utils.py           — format_movie()
+├── ui_helpers.py      — UI-хелперы: show_page, show_movie_detail, show_tmdb_results и др. (8 функций)
+└── handlers/
+    ├── __init__.py
+    ├── basic.py       — /start, /help, /add, /list, /pages, /wlist, /info, /random + колбэки навигации
+    ├── movie_actions.py — /watched, /remove, /rename, /export + колбэки действий над фильмами
+    ├── polling.py     — /poll, /vote, /rpoll
+    ├── basket.py      — /v+, /v-, /vmy, /vlist, /go, /vrand, /vc
+    ├── ai_features.py — /rec (Groq)
+    └── sync.py        — /sync и его колбэки
 
-movie_watchlist_bot.py  — Telegram handlers, callbacks, UI-хелперы, main()
+movie_watchlist_bot.py  — только main() + регистрация хэндлеров
 api.py                  — FastAPI REST API для iOS приложения
 run.sh                  — скрипт запуска бота
 venv/                   — виртуальное окружение Python
 .env                    — секреты (в gitignore)
-```
-
-### Целевая структура (TODO для дальнейшего рефакторинга)
-
-```
-bot/
-├── __init__.py
-├── db.py              ✅ готово
-├── tmdb_api.py        ✅ готово
-├── utils.py           📋 TODO — format_movie, call_mcp_tool
-├── ui_helpers.py      📋 TODO — show_page, show_movie_detail, show_tmdb_results и др. (8 функций)
-└── handlers/
-    ├── __init__.py
-    ├── basic.py       📋 TODO — /add, /list, /pages, /wlist, /info, /random
-    ├── movie_actions.py 📋 TODO — /watched, /remove, /rename, /export
-    ├── polling.py     📋 TODO — /poll, /vote, /rpoll
-    ├── basket.py      📋 TODO — /v+, /v-, /vmy, /vlist, /go, /vrand, /vc
-    ├── ai_features.py 📋 TODO — /rec (Groq)
-    └── sync.py        📋 TODO — /sync и его колбэки
-
-movie_watchlist_bot.py  — после полного рефакторинга: только main() + регистрация хэндлеров
 ```
 
 ### Groq AI модуль (`bot/groq_ai.py`)
