@@ -25,7 +25,7 @@ from bot.db import init_db
 from bot.handlers.basic import (
     start, help_command, add_movie, batch_add,
     list_movies, pages_command, wlist_command,
-    info_command, random_movie,
+    info_command, random_movie, app_command,
     tmdb_add_callback, page_callback, watched_callback,
 )
 from bot.handlers.movie_actions import (
@@ -71,6 +71,7 @@ def main() -> None:
     application.add_handler(CommandHandler("wlist", wlist_command))
     application.add_handler(CommandHandler("info", info_command))
     application.add_handler(CommandHandler("random", random_movie))
+    application.add_handler(CommandHandler("app", app_command))
     application.add_handler(CommandHandler("poll", create_poll))
     application.add_handler(CommandHandler("vote", vote_poll))
     application.add_handler(CommandHandler("rpoll", random_from_selection))

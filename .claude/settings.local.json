@@ -15,7 +15,19 @@
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "Bash(python -c \":*)",
-      "Bash(python -c \"import movie_watchlist_bot; print\\(''OK''\\)\")"
+      "Bash(python -c \"import movie_watchlist_bot; print\\(''OK''\\)\")",
+      "Bash(python -c \"from bot.handlers.basic import start; print\\(''basic OK''\\)\")",
+      "Bash(python -c \"from bot.handlers.movie_actions import mark_watched; print\\(''movie_actions OK''\\)\")",
+      "Bash(python -c \"from bot.handlers.polling import create_poll; from bot.handlers.basket import basket_go; from bot.handlers.ai_features import rec_command; from bot.handlers.sync import sync_command; print\\(''all handlers OK''\\)\")",
+      "Bash(python -c \"from movie_watchlist_bot import main; print\\(''main OK''\\)\")",
+      "Bash(python -c \"from api import app; print\\(''api OK''\\)\")",
+      "Bash(python -c \"from api import app; print\\(''OK''\\)\")",
+      "Bash(python -W error -c \"from api import app; print\\(''OK''\\)\")",
+      "Bash(sed -i '' 's/example=\"\"Inception\"\"/json_schema_extra={\"\"example\"\": \"\"Inception\"\"}/g' api.py)",
+      "Bash(sed -i '' 's/example=27205/json_schema_extra={\"\"example\"\": 27205}/g' api.py)",
+      "Bash(sed -i '' 's/example=2010/json_schema_extra={\"\"example\"\": 2010}/g' api.py)",
+      "Bash(sed -i '' 's/example=8.4/json_schema_extra={\"\"example\"\": 8.4}/g' api.py)",
+      "Bash(sed -i '' 's|example=\"\"/oYuLEt3zVCKq57qu2F8dT7NIa6f.jpg\"\"|json_schema_extra={\"\"example\"\": \"\"/oYuLEt3zVCKq57qu2F8dT7NIa6f.jpg\"\"}|g' api.py)"
     ]
   }
 }

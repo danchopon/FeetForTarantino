@@ -1,6 +1,7 @@
 """Basic bot commands: /start, /help, /add, /list, /pages, /wlist, /info, /random + their callbacks."""
 
 import random
+from urllib.parse import quote
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -62,6 +63,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 `/sync -w` — синхронизировать просмотренные
 `/export` — экспорт .txt
 `/export -csv` — экспорт .csv
+`/app` — открыть список в iOS приложении
 """
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
@@ -511,6 +513,26 @@ async def random_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         text += f" ⭐{chosen['rating']:.1f}"
 
     await update.message.reply_text(text, parse_mode="Markdown")
+
+
+async def app_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send a deep link to open the watchlist in the iOS app."""
+    chat = update.effective_chat
+    chat_id = chat.id
+
+    if chat.title:
+        chat_name = chat.title
+    else:
+        chat_name = update.effective_user.first_name
+
+    encoded_name = quote(chat_name)
+    deep_link = f"feetfortarantino://chat?id={chat_id}&name={encoded_name}"
+
+    keyboard = [[InlineKeyboardButton("📱 Открыть в приложении", url=deep_link)]]
+    await update.message.reply_text(
+        "Нажми кнопку чтобы открыть список в приложении:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
 
 
 # ── Callbacks ─────────────────────────────────────────────────────────────────
