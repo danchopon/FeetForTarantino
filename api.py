@@ -12,6 +12,7 @@ import asyncio
 import os
 import random as _random
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from typing import Optional, List
 
 import httpx
@@ -23,6 +24,9 @@ from pydantic import BaseModel, Field
 from telegram import Bot
 
 load_dotenv()
+
+# (chat_id, user_id) → last heartbeat UTC time (in-memory, resets on restart)
+_presence: dict[tuple[int, int], datetime] = {}
 
 from bot.db import (
     init_db,
@@ -868,3 +872,46 @@ async def get_user_photo(
                     yield chunk
 
     return StreamingResponse(_stream(), media_type="image/jpeg")
+
+
+# ── presence ──────────────────────────────────────────────────────────────────
+
+class HeartbeatRequest(BaseModel):
+    chat_id: int = Field(..., description="Telegram group chat ID", examples=[-1001234567890])
+    user_id: int = Field(..., description="Telegram user ID", examples=[123456789])
+
+
+class PresenceResponse(BaseModel):
+    online_user_ids: List[int] = Field(..., description="User IDs active in the last 90 seconds")
+
+
+@app.post(
+    "/presence/heartbeat",
+    summary="Register user as online",
+    response_model=dict,
+    tags=["Presence"],
+)
+async def heartbeat(body: HeartbeatRequest):
+    """
+    Call every ~30 seconds while the app is in the foreground to mark the user as online.
+    Presence data is in-memory only and resets when the server restarts.
+    """
+    _presence[(body.chat_id, body.user_id)] = datetime.utcnow()
+    return {"status": "ok"}
+
+
+@app.get(
+    "/presence",
+    summary="Get online users for a chat",
+    response_model=PresenceResponse,
+    tags=["Presence"],
+)
+async def get_presence(
+    chat_id: int = Query(..., description="Telegram group chat ID", examples=[-1001234567890]),
+):
+    """
+    Returns user IDs that sent a heartbeat within the last 90 seconds for this chat.
+    """
+    threshold = datetime.utcnow() - timedelta(seconds=90)
+    online = [uid for (cid, uid), t in _presence.items() if cid == chat_id and t > threshold]
+    return PresenceResponse(online_user_ids=online)
