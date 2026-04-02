@@ -5,3 +5,4 @@ __pycache__/
 venv/
 .claude/settings.local.json
 .mcp.json
+.vscode/settings.json
