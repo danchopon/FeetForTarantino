@@ -55,24 +55,26 @@ Response format:
 def _build_user_prompt(query: str, watched: list[dict], watchlist: list[dict]) -> str:
     parts = []
 
-    if watched:
-        lines = []
-        for m in watched[:30]:
-            line = f"- {m['title']}"
-            if m.get("year"):
-                line += f" ({m['year']})"
-            if m.get("genres"):
-                line += f" [{m['genres']}]"
-            if m.get("rating"):
-                line += f" ⭐{m['rating']}"
-            lines.append(line)
-        parts.append("Already watched (DO NOT suggest):\n" + "\n".join(lines))
-    else:
-        parts.append("Watch history: empty (new group)")
+    if not query:
+        # History intent: LLM needs watch patterns + avoid duplicates
+        if watched:
+            lines = []
+            for m in watched[:20]:
+                line = f"- {m['title']}"
+                if m.get("year"):
+                    line += f" ({m['year']})"
+                if m.get("genres"):
+                    line += f" [{m['genres']}]"
+                if m.get("rating"):
+                    line += f" ⭐{m['rating']}"
+                lines.append(line)
+            parts.append("Already watched (DO NOT suggest):\n" + "\n".join(lines))
+        else:
+            parts.append("Watch history: empty (new group)")
 
-    if watchlist:
-        titles = [m["title"] for m in watchlist[:20]]
-        parts.append("Already in watchlist (DO NOT suggest):\n" + "\n".join(f"- {t}" for t in titles))
+        if watchlist:
+            titles = [m["title"] for m in watchlist[:15]]
+            parts.append("Already in watchlist (DO NOT suggest):\n" + "\n".join(f"- {t}" for t in titles))
 
     parts.append(f"User request: {query if query else '(no specific request — recommend based on history)'}")
 
