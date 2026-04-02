@@ -7,3 +7,13 @@
 - No sycophantic openers or closing fluff.
 - Keep solutions simple and direct.
 - User instructions always override this file.
+
+## Core Principles
+
+- Never use emojis.
+
+## Commit Authorship
+
+When committing code changes:
+- Never add Claude as a commit author.
+- Always commit as using the default git settings
