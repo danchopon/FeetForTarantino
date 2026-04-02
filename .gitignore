@@ -3,3 +3,13 @@ __pycache__/
 *.pyc
 .DS_Store
 venv/
+
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Claude Code
+.mcp.json
+.claude/

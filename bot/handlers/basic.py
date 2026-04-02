@@ -35,6 +35,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 `/wlist` — просмотренные
 `/info 5` — инфо о фильме
 `/watched 5` — отметить просмотренным
+`/unwatched 5` — вернуть в список
 `/remove 5` — удалить
 `/rename 5 Новое название` — переименовать
 

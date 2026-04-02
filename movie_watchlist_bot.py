@@ -29,7 +29,7 @@ from bot.handlers.basic import (
     tmdb_add_callback, page_callback, watched_callback,
 )
 from bot.handlers.movie_actions import (
-    mark_watched, remove_movie, rename_movie, export_list,
+    mark_watched, unwatch_movie, remove_movie, rename_movie, export_list,
     movie_action_callback, watched_action_callback,
     handle_rename_text,
 )
@@ -64,6 +64,7 @@ def main() -> None:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("add", add_movie))
     application.add_handler(CommandHandler("watched", mark_watched))
+    application.add_handler(CommandHandler("unwatched", unwatch_movie))
     application.add_handler(CommandHandler("remove", remove_movie))
     application.add_handler(CommandHandler("rename", rename_movie))
     application.add_handler(CommandHandler("list", list_movies))

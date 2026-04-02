@@ -8,13 +8,19 @@ Docs available at:
     http://localhost:8000/docs
 """
 
+import asyncio
+import os
+import random as _random
 from contextlib import asynccontextmanager
 from typing import Optional, List
 
+import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from telegram import Bot
 
 load_dotenv()
 
@@ -28,6 +34,12 @@ from bot.db import (
     unwatch_movie_by_id,
     remove_movie_by_id,
     rename_movie_by_id,
+    add_to_basket,
+    remove_from_basket,
+    clear_basket,
+    get_user_basket,
+    get_full_basket,
+    get_unique_basket_movies,
 )
 from bot.tmdb_api import tmdb_search, parse_movie_query, tmdb_get_movie, tmdb_get_credits
 from bot.groq_ai import get_rec_suggestions
@@ -36,7 +48,18 @@ from bot.groq_ai import get_rec_suggestions
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if token:
+        bot = Bot(token=token)
+        await bot.initialize()
+        app.state.bot = bot
+        app.state.bot_token = token
+    else:
+        app.state.bot = None
+        app.state.bot_token = None
     yield
+    if app.state.bot:
+        await app.state.bot.shutdown()
 
 
 app = FastAPI(
@@ -163,11 +186,67 @@ class RenameResponse(BaseModel):
     new_title: str
 
 
+class BasketAddRequest(BaseModel):
+    chat_id: int = Field(..., description="Telegram group chat ID", examples=[-1001234567890])
+    user_id: int = Field(..., description="Telegram user ID", examples=[123456789])
+    user_name: str = Field(..., description="Display name", examples=["Daniiar"])
+    movie_nums: List[int] = Field(..., description="1-based positions in the to_watch list", examples=[[1, 5, 12]])
+
+
+class BasketRemoveRequest(BaseModel):
+    movie_nums: Optional[List[int]] = Field(
+        None,
+        description="Positions to remove. Omit (or pass null) to clear the user's entire basket.",
+        examples=[[1, 5]],
+    )
+
+
+class BasketMovieEntry(BaseModel):
+    movie_num: int = Field(..., description="1-based position in to_watch list")
+    movie: Optional[MovieResponse] = Field(None, description="Resolved movie, null if num out of range")
+
+
+class UserBasketEntry(BaseModel):
+    user_id: int
+    user_name: str
+    movies: List[BasketMovieEntry]
+
+
+class BasketResponse(BaseModel):
+    by_user: List[UserBasketEntry]
+    unique_count: int = Field(..., description="Number of distinct movie positions across all users")
+
+
+class BasketAddResponse(BaseModel):
+    added: List[int] = Field(..., description="Positions successfully added")
+    already_in_basket: List[int] = Field(..., description="Positions already present")
+
+
+class ChatMemberResponse(BaseModel):
+    user_id: int = Field(..., description="Telegram user ID")
+    first_name: str
+    last_name: Optional[str] = None
+    username: Optional[str] = Field(None, description="Without the @ prefix")
+    is_bot: bool
+    photo_url: Optional[str] = Field(
+        None,
+        description="Proxied photo URL: GET /users/{user_id}/photo?chat_id=X. Null if user has no photo.",
+    )
+
+
 # ── internal helpers ─────────────────────────────────────────────────────────
+
+async def _has_profile_photo(bot: Bot, user_id: int) -> bool:
+    """Return True if the Telegram user has at least one profile photo."""
+    try:
+        photos = await bot.get_user_profile_photos(user_id, limit=1)
+        return photos.total_count > 0
+    except Exception:
+        return False
+
 
 async def _fetch_tmdb_extras(tmdb_id: int) -> tuple[dict | None, str | None]:
     """Fetch movie details and director from TMDB in parallel."""
-    import asyncio
     details, director = await asyncio.gather(
         tmdb_get_movie(tmdb_id),
         tmdb_get_credits(tmdb_id),
@@ -433,3 +512,359 @@ async def get_recommendations(
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
     return result
+
+
+# ── random ────────────────────────────────────────────────────────────────────
+
+@app.get(
+    "/random",
+    summary="Random movie from watchlist",
+    response_model=MovieResponse,
+    responses={404: {"description": "Watchlist is empty"}},
+    tags=["Random"],
+)
+async def random_movie(
+    chat_id: int = Query(..., description="Telegram group chat ID", examples=[-1001234567890]),
+):
+    """Returns a single randomly chosen movie from the to_watch list."""
+    movies = get_movies_db(chat_id, "to_watch")
+    if not movies:
+        raise HTTPException(status_code=404, detail="Watchlist is empty")
+    return _serialize(_random.choice(movies))
+
+
+# ── vote basket ───────────────────────────────────────────────────────────────
+
+def _resolve_basket(chat_id: int, basket_rows: list) -> tuple[list, list]:
+    """Return (to_watch list, resolved BasketMovieEntry dicts) for given basket rows."""
+    to_watch = get_movies_db(chat_id, "to_watch")
+
+    def _entry(num: int) -> dict:
+        movie = _serialize(to_watch[num - 1]) if 1 <= num <= len(to_watch) else None
+        return {"movie_num": num, "movie": movie}
+
+    return to_watch, [_entry(row["movie_num"]) for row in basket_rows]
+
+
+@app.get(
+    "/basket",
+    summary="Full vote basket (all users)",
+    response_model=BasketResponse,
+    tags=["Basket"],
+)
+async def get_basket(
+    chat_id: int = Query(..., description="Telegram group chat ID", examples=[-1001234567890]),
+):
+    """
+    Returns the vote basket grouped by user, each entry resolved to a movie object.
+
+    `movie_num` is the 1-based position in the current to_watch list.
+    `movie` is null when the position is out of range (list changed since adding).
+    """
+    rows = get_full_basket(chat_id)
+    to_watch = get_movies_db(chat_id, "to_watch")
+
+    by_user: dict[int, dict] = {}
+    for row in rows:
+        uid = row["user_id"]
+        if uid not in by_user:
+            by_user[uid] = {"user_id": uid, "user_name": row["user_name"], "movies": []}
+        num = row["movie_num"]
+        movie = _serialize(to_watch[num - 1]) if 1 <= num <= len(to_watch) else None
+        by_user[uid]["movies"].append({"movie_num": num, "movie": movie})
+
+    unique_count = len(get_unique_basket_movies(chat_id))
+    return {"by_user": list(by_user.values()), "unique_count": unique_count}
+
+
+@app.get(
+    "/basket/my",
+    summary="My basket entries",
+    response_model=List[BasketMovieEntry],
+    tags=["Basket"],
+)
+async def get_my_basket(
+    chat_id: int = Query(..., description="Telegram group chat ID", examples=[-1001234567890]),
+    user_id: int = Query(..., description="Telegram user ID", examples=[123456789]),
+):
+    """Returns the calling user's basket entries with resolved movie objects."""
+    nums = get_user_basket(chat_id, user_id)
+    to_watch = get_movies_db(chat_id, "to_watch")
+    return [
+        {"movie_num": n, "movie": _serialize(to_watch[n - 1]) if 1 <= n <= len(to_watch) else None}
+        for n in nums
+    ]
+
+
+@app.post(
+    "/basket/add",
+    summary="Add movies to basket",
+    response_model=BasketAddResponse,
+    tags=["Basket"],
+)
+async def basket_add(body: BasketAddRequest):
+    """
+    Add one or more to_watch positions to a user's basket.
+
+    `movie_nums` are 1-based positions in the chat's current to_watch list.
+    Positions already in the basket are reported in `already_in_basket` and not duplicated.
+    """
+    to_watch = get_movies_db(body.chat_id, "to_watch")
+    valid = [n for n in body.movie_nums if 1 <= n <= len(to_watch)]
+    invalid = [n for n in body.movie_nums if n not in valid]
+
+    if invalid:
+        raise HTTPException(
+            status_code=422,
+            detail=f"movie_nums out of range (watchlist has {len(to_watch)} items): {invalid}",
+        )
+
+    added, already = add_to_basket(body.chat_id, body.user_id, body.user_name, valid)
+    return {"added": added, "already_in_basket": already}
+
+
+@app.delete(
+    "/basket/remove",
+    summary="Remove from user's basket",
+    response_model=StatusResponse,
+    tags=["Basket"],
+)
+async def basket_remove(
+    chat_id: int = Query(..., description="Telegram group chat ID", examples=[-1001234567890]),
+    user_id: int = Query(..., description="Telegram user ID", examples=[123456789]),
+    body: BasketRemoveRequest = BasketRemoveRequest(),
+):
+    """
+    Remove specific positions from a user's basket, or clear the entire user basket.
+
+    - Pass `movie_nums` in the request body to remove specific entries.
+    - Omit `movie_nums` (or pass `null`) to clear all entries for that user.
+    """
+    count = remove_from_basket(chat_id, user_id, body.movie_nums)
+    return {"status": "removed", "title": f"{count} entries"}
+
+
+@app.delete(
+    "/basket/clear",
+    summary="Clear entire basket for a chat",
+    response_model=StatusResponse,
+    tags=["Basket"],
+)
+async def basket_clear_all(
+    chat_id: int = Query(..., description="Telegram group chat ID", examples=[-1001234567890]),
+):
+    """Removes all basket entries for the chat (equivalent to bot `/vc`)."""
+    count = clear_basket(chat_id)
+    return {"status": "cleared", "title": f"{count} entries"}
+
+
+@app.get(
+    "/basket/random",
+    summary="Random movie from basket",
+    response_model=MovieResponse,
+    responses={404: {"description": "Basket is empty or all positions out of range"}},
+    tags=["Basket"],
+)
+async def basket_random_movie(
+    chat_id: int = Query(..., description="Telegram group chat ID", examples=[-1001234567890]),
+):
+    """Returns a randomly chosen movie from the unique basket positions (equivalent to bot `/vrand`)."""
+    unique_nums = get_unique_basket_movies(chat_id)
+    if not unique_nums:
+        raise HTTPException(status_code=404, detail="Basket is empty")
+
+    to_watch = get_movies_db(chat_id, "to_watch")
+    valid = [n for n in unique_nums if 1 <= n <= len(to_watch)]
+    if not valid:
+        raise HTTPException(status_code=404, detail="No valid movies in basket")
+
+    return _serialize(to_watch[_random.choice(valid) - 1])
+
+
+# ── polling ───────────────────────────────────────────────────────────────────
+
+@app.get(
+    "/poll",
+    summary="Random poll candidates",
+    response_model=List[MovieResponse],
+    responses={404: {"description": "Not enough movies in watchlist"}},
+    tags=["Poll"],
+)
+async def poll_random(
+    chat_id: int = Query(..., description="Telegram group chat ID", examples=[-1001234567890]),
+    n: int = Query(3, ge=2, le=10, description="Number of movies to sample (2–10)"),
+):
+    """
+    Returns `n` randomly sampled movies from the to_watch list — the options for a poll.
+
+    Equivalent to bot `/poll N`. Send the results as a Telegram poll or display a picker in the app.
+    """
+    movies = get_movies_db(chat_id, "to_watch")
+    if len(movies) < 2:
+        raise HTTPException(status_code=404, detail="Need at least 2 movies in watchlist")
+    sample = _random.sample(movies, min(n, len(movies)))
+    return [_serialize(m) for m in sample]
+
+
+@app.get(
+    "/poll/pick",
+    summary="Poll candidates by position",
+    response_model=List[MovieResponse],
+    responses={422: {"description": "Invalid or out-of-range movie_nums"}},
+    tags=["Poll"],
+)
+async def poll_pick(
+    chat_id: int = Query(..., description="Telegram group chat ID", examples=[-1001234567890]),
+    movie_nums: str = Query(..., description="Comma-separated 1-based positions, e.g. `1,5,12`", examples=["1,5,12"]),
+):
+    """
+    Returns the specific to_watch movies at the given positions.
+
+    Equivalent to bot `/vote 1,5,12`. Use these as poll options or pass to `/poll/random_pick`
+    to let the server choose one.
+    """
+    try:
+        nums = [int(x.strip()) for x in movie_nums.split(",") if x.strip()]
+    except ValueError:
+        raise HTTPException(status_code=422, detail="movie_nums must be comma-separated integers")
+
+    movies = get_movies_db(chat_id, "to_watch")
+    invalid = [n for n in nums if not (1 <= n <= len(movies))]
+    if invalid:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Positions out of range (watchlist has {len(movies)} items): {invalid}",
+        )
+
+    return [_serialize(movies[n - 1]) for n in nums]
+
+
+@app.get(
+    "/poll/rpick",
+    summary="Random pick from specific positions",
+    response_model=MovieResponse,
+    responses={422: {"description": "Invalid or out-of-range movie_nums"}},
+    tags=["Poll"],
+)
+async def poll_rpick(
+    chat_id: int = Query(..., description="Telegram group chat ID", examples=[-1001234567890]),
+    movie_nums: str = Query(..., description="Comma-separated 1-based positions, e.g. `1,5,12`", examples=["1,5,12"]),
+):
+    """
+    Randomly picks **one** movie from the specified positions.
+
+    Equivalent to bot `/rpoll 1,5,12`.
+    """
+    try:
+        nums = [int(x.strip()) for x in movie_nums.split(",") if x.strip()]
+    except ValueError:
+        raise HTTPException(status_code=422, detail="movie_nums must be comma-separated integers")
+
+    movies = get_movies_db(chat_id, "to_watch")
+    valid = [n for n in nums if 1 <= n <= len(movies)]
+    if not valid:
+        raise HTTPException(status_code=422, detail="No valid positions provided")
+
+    return _serialize(movies[_random.choice(valid) - 1])
+
+
+# ── users ─────────────────────────────────────────────────────────────────────
+
+@app.get(
+    "/users",
+    summary="List group members",
+    response_model=List[ChatMemberResponse],
+    responses={
+        503: {"description": "TELEGRAM_BOT_TOKEN not configured"},
+        502: {"description": "Telegram API error (bot not in group, invalid chat_id, etc.)"},
+    },
+    tags=["Users"],
+)
+async def get_users(
+    request: Request,
+    chat_id: int = Query(..., description="Telegram group chat ID", examples=[-1001234567890]),
+):
+    """
+    Returns all group administrators with basic profile info and proxied photo URLs.
+
+    Since the group currently consists entirely of admins, this effectively returns all members.
+    `photo_url` points to `GET /users/{user_id}/photo` — the bot token is never exposed to clients.
+    Photo presence is checked for all members in parallel.
+    """
+    bot: Optional[Bot] = request.app.state.bot
+    if bot is None:
+        raise HTTPException(status_code=503, detail="TELEGRAM_BOT_TOKEN not configured")
+
+    try:
+        admins = await bot.get_chat_administrators(chat_id)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Telegram API error: {e}")
+
+    async def _build(member) -> dict:
+        u = member.user
+        has_photo = await _has_profile_photo(bot, u.id)
+        return {
+            "user_id": u.id,
+            "first_name": u.first_name,
+            "last_name": u.last_name,
+            "username": u.username,
+            "is_bot": u.is_bot,
+            "photo_url": f"/users/{u.id}/photo?chat_id={chat_id}" if has_photo else None,
+        }
+
+    return list(await asyncio.gather(*[_build(m) for m in admins]))
+
+
+@app.get(
+    "/users/{user_id}/photo",
+    summary="Get user profile photo",
+    responses={
+        200: {"content": {"image/jpeg": {}}, "description": "JPEG image bytes"},
+        404: {"description": "User has no profile photo"},
+        503: {"description": "TELEGRAM_BOT_TOKEN not configured"},
+        502: {"description": "Telegram API error"},
+    },
+    tags=["Users"],
+)
+async def get_user_photo(
+    user_id: int,
+    request: Request,
+    chat_id: int = Query(..., description="Telegram group chat ID", examples=[-1001234567890]),
+):
+    """
+    Proxies the user's Telegram profile photo as JPEG bytes.
+
+    The bot token is never exposed in the URL — this endpoint fetches the image
+    server-side and streams it to the client.
+    Uses the smallest available photo size (suitable for avatars).
+    """
+    bot: Optional[Bot] = request.app.state.bot
+    if bot is None:
+        raise HTTPException(status_code=503, detail="TELEGRAM_BOT_TOKEN not configured")
+
+    try:
+        photos = await bot.get_user_profile_photos(user_id, limit=1)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Telegram API error: {e}")
+
+    if not photos.total_count or not photos.photos:
+        raise HTTPException(status_code=404, detail="User has no profile photo")
+
+    # photos.photos[0] = most recent set; [0] = smallest size (good for avatars)
+    file_id = photos.photos[0][0].file_id
+
+    try:
+        file_obj = await bot.get_file(file_id)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not resolve file: {e}")
+
+    token = request.app.state.bot_token
+    download_url = f"https://api.telegram.org/file/bot{token}/{file_obj.file_path}"
+
+    async def _stream():
+        async with httpx.AsyncClient() as client:
+            async with client.stream("GET", download_url) as resp:
+                async for chunk in resp.aiter_bytes(8192):
+                    yield chunk
+
+    return StreamingResponse(_stream(), media_type="image/jpeg")

@@ -90,6 +90,42 @@ async def remove_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(f"❌ Фильм *{search}* не найден", parse_mode="Markdown")
 
 
+async def unwatch_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Move a watched movie back to the watchlist by its position number."""
+    if not context.args:
+        await update.message.reply_text("❌ Укажи номер: `/unwatched 5`", parse_mode="Markdown")
+        return
+
+    try:
+        num = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Укажи номер: `/unwatched 5`", parse_mode="Markdown")
+        return
+
+    chat_id = update.effective_chat.id
+    watched = get_movies_db(chat_id, "watched")
+
+    if not watched or num < 1 or num > len(watched):
+        count = len(watched) if watched else 0
+        await update.message.reply_text(
+            f"❌ Неверный номер. Просмотрено фильмов: {count}",
+            parse_mode="Markdown"
+        )
+        return
+
+    movie = watched[num - 1]
+    success, title = unwatch_movie_by_id(chat_id, movie["id"])
+
+    if success:
+        counts = get_counts_db(chat_id)
+        await update.message.reply_text(
+            f"↩️ *{title}* возвращён в список!\n📋 К просмотру: {counts['to_watch']} | ✅ Просмотрено: {counts['watched']}",
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text(f"❌ Не удалось вернуть *{title}*", parse_mode="Markdown")
+
+
 async def rename_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Rename movie by number. Usage: /rename 5 New Title"""
     if len(context.args) < 2:
