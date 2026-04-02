@@ -23,7 +23,7 @@ TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
 
 SYSTEM_PROMPT = """You are a smart movie recommendation assistant for a group chat.
 
-Analyze the user's request and watch history, then suggest exactly 3 movies.
+Analyze the user's request and watch history, then suggest exactly 5 movies.
 
 First, detect the intent:
 - "similar" — user mentions a specific movie title (e.g. "like Inception", "похожее на Начало", "как Prestige")
@@ -157,7 +157,7 @@ async def get_rec_suggestions(chat_id: int, query: str) -> dict:
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.7,
-            max_tokens=800,
+            max_tokens=1200,
         )
     except Exception as e:
         logger.error(f"Groq API error: {e}")
