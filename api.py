@@ -17,7 +17,7 @@ from typing import Optional, List
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -27,6 +27,30 @@ load_dotenv()
 
 # (chat_id, user_id) → last heartbeat UTC time (in-memory, resets on restart)
 _presence: dict[tuple[int, int], datetime] = {}
+
+
+class ConnectionManager:
+    def __init__(self):
+        self._connections: dict[int, list[WebSocket]] = {}
+
+    async def connect(self, chat_id: int, ws: WebSocket):
+        await ws.accept()
+        self._connections.setdefault(chat_id, []).append(ws)
+
+    def disconnect(self, chat_id: int, ws: WebSocket):
+        conns = self._connections.get(chat_id, [])
+        if ws in conns:
+            conns.remove(ws)
+
+    async def broadcast(self, chat_id: int, event: dict):
+        for ws in list(self._connections.get(chat_id, [])):
+            try:
+                await ws.send_json(event)
+            except Exception:
+                self.disconnect(chat_id, ws)
+
+
+manager = ConnectionManager()
 
 from bot.db import (
     init_db,
@@ -351,6 +375,7 @@ async def add_movie(body: AddMovieRequest):
             status_code=409,
             detail=f"Movie already exists with status '{status}'",
         )
+    await manager.broadcast(body.chat_id, {"event": "movie_added", "chat_id": body.chat_id, "data": {"title": body.title}})
     return {"status": "added", "title": body.title}
 
 
@@ -370,6 +395,7 @@ async def mark_watched(
     success, title = mark_watched_by_id(chat_id, movie_id, body.watched_by)
     if not success:
         raise HTTPException(status_code=400, detail="Movie not found or already watched")
+    await manager.broadcast(chat_id, {"event": "movie_watched", "chat_id": chat_id, "data": {"id": movie_id, "title": title}})
     return {"status": "watched", "title": title}
 
 
@@ -388,6 +414,7 @@ async def unwatch(
     success, title = unwatch_movie_by_id(chat_id, movie_id)
     if not success:
         raise HTTPException(status_code=400, detail="Movie not found or not in watched list")
+    await manager.broadcast(chat_id, {"event": "movie_unwatched", "chat_id": chat_id, "data": {"id": movie_id, "title": title}})
     return {"status": "to_watch", "title": title}
 
 
@@ -407,6 +434,7 @@ async def rename_movie(
     success, old_title = rename_movie_by_id(chat_id, movie_id, body.new_title)
     if not success:
         raise HTTPException(status_code=400, detail="Movie not found or title already exists")
+    await manager.broadcast(chat_id, {"event": "movie_renamed", "chat_id": chat_id, "data": {"id": movie_id, "old_title": old_title, "new_title": body.new_title}})
     return {"old_title": old_title, "new_title": body.new_title}
 
 
@@ -425,6 +453,7 @@ async def remove_movie(
     title = remove_movie_by_id(chat_id, movie_id)
     if not title:
         raise HTTPException(status_code=404, detail="Movie not found")
+    await manager.broadcast(chat_id, {"event": "movie_removed", "chat_id": chat_id, "data": {"id": movie_id, "title": title}})
     return {"status": "removed", "title": title}
 
 
@@ -624,6 +653,8 @@ async def basket_add(body: BasketAddRequest):
         )
 
     added, already = add_to_basket(body.chat_id, body.user_id, body.user_name, valid)
+    if added:
+        await manager.broadcast(body.chat_id, {"event": "basket_updated", "chat_id": body.chat_id, "data": {}})
     return {"added": added, "already_in_basket": already}
 
 
@@ -645,6 +676,8 @@ async def basket_remove(
     - Omit `movie_nums` (or pass `null`) to clear all entries for that user.
     """
     count = remove_from_basket(chat_id, user_id, body.movie_nums)
+    if count:
+        await manager.broadcast(chat_id, {"event": "basket_updated", "chat_id": chat_id, "data": {}})
     return {"status": "removed", "title": f"{count} entries"}
 
 
@@ -659,6 +692,8 @@ async def basket_clear_all(
 ):
     """Removes all basket entries for the chat (equivalent to bot `/vc`)."""
     count = clear_basket(chat_id)
+    if count:
+        await manager.broadcast(chat_id, {"event": "basket_updated", "chat_id": chat_id, "data": {}})
     return {"status": "cleared", "title": f"{count} entries"}
 
 
@@ -915,3 +950,34 @@ async def get_presence(
     threshold = datetime.utcnow() - timedelta(seconds=90)
     online = [uid for (cid, uid), t in _presence.items() if cid == chat_id and t > threshold]
     return PresenceResponse(online_user_ids=online)
+
+
+# ── realtime ──────────────────────────────────────────────────────────────────
+
+@app.websocket("/ws/{chat_id}")
+async def websocket_endpoint(websocket: WebSocket, chat_id: int):
+    """
+    WebSocket endpoint for real-time watchlist and basket updates.
+
+    Connect once per chat to receive push events whenever data changes.
+    The server never closes the connection — disconnect from the client side when done.
+
+    **Event format:**
+    ```json
+    {"event": "<type>", "chat_id": <int>, "data": {...}}
+    ```
+
+    **Events:**
+    - `movie_added` — data: `{title}`
+    - `movie_watched` — data: `{id, title}`
+    - `movie_unwatched` — data: `{id, title}`
+    - `movie_removed` — data: `{id, title}`
+    - `movie_renamed` — data: `{id, old_title, new_title}`
+    - `basket_updated` — data: `{}` (refetch `/basket`)
+    """
+    await manager.connect(chat_id, websocket)
+    try:
+        while True:
+            await websocket.receive_text()  # keep-alive; client messages are ignored
+    except WebSocketDisconnect:
+        manager.disconnect(chat_id, websocket)
