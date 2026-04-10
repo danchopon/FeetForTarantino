@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import random as _random
+import secrets
 import time
 from contextlib import asynccontextmanager
 from typing import Optional, List
@@ -21,7 +22,7 @@ import redis.asyncio as aioredis
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from telegram import Bot
 
@@ -141,6 +142,82 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── auth ──────────────────────────────────────────────────────────────────────
+
+_SESSION_TTL = 60 * 60 * 24 * 30  # 30 days
+_OPEN_PATHS = {"/docs", "/openapi.json", "/redoc", "/auth/exchange"}
+
+
+@app.middleware("http")
+async def verify_session(request: Request, call_next):
+    if request.url.path in _OPEN_PATHS or request.url.path.startswith("/ws/"):
+        return await call_next(request)
+    if not _redis_client:
+        return await call_next(request)  # no Redis — skip auth (local dev)
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+    session_data = await _redis_client.get(f"session:{auth[7:]}")
+    if not session_data:
+        return JSONResponse(status_code=401, content={"detail": "Invalid or expired session"})
+    session = json.loads(session_data)
+    request.state.user_id = session["user_id"]
+    request.state.user_name = session["user_name"]
+    request.state.chat_id = session["chat_id"]
+    request.state.chat_name = session["chat_name"]
+    return await call_next(request)
+
+
+class ExchangeRequest(BaseModel):
+    token: str
+
+
+class SessionResponse(BaseModel):
+    session_token: str
+    expires_in: int = _SESSION_TTL
+    user_id: int
+    user_name: str
+    chat_id: int
+    chat_name: str
+
+
+@app.post(
+    "/auth/exchange",
+    summary="Exchange OTP for a session token",
+    response_model=SessionResponse,
+    responses={
+        400: {"description": "Token missing"},
+        404: {"description": "Token not found or expired"},
+        503: {"description": "Redis not configured"},
+    },
+    tags=["Auth"],
+)
+async def auth_exchange(body: ExchangeRequest):
+    """
+    Called once when the iOS app opens via the Telegram deep link.
+
+    Consumes the single-use OTP, creates a 30-day session, and returns
+    the session token. Store it in the iOS Keychain and send it as
+    `Authorization: Bearer <session_token>` on every subsequent request.
+    """
+    if not body.token:
+        raise HTTPException(status_code=400, detail="Token required")
+    if not _redis_client:
+        raise HTTPException(status_code=503, detail="Auth service unavailable")
+    payload_str = await _redis_client.getdel(f"otp:{body.token}")
+    if not payload_str:
+        raise HTTPException(status_code=404, detail="Token not found or expired")
+    payload = json.loads(payload_str)
+    session_token = secrets.token_urlsafe(32)
+    await _redis_client.setex(f"session:{session_token}", _SESSION_TTL, json.dumps(payload))
+    return SessionResponse(
+        session_token=session_token,
+        user_id=payload["user_id"],
+        user_name=payload["user_name"],
+        chat_id=payload["chat_id"],
+        chat_name=payload["chat_name"],
+    )
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -984,9 +1061,11 @@ async def get_presence(
 # ── realtime ──────────────────────────────────────────────────────────────────
 
 @app.websocket("/ws/{chat_id}")
-async def websocket_endpoint(websocket: WebSocket, chat_id: int):
+async def websocket_endpoint(websocket: WebSocket, chat_id: int, session_token: str = Query("")):
     """
     WebSocket endpoint for real-time watchlist and basket updates.
+
+    Pass the session token as a query parameter: `?session_token=<token>`
 
     Connect once per chat to receive push events whenever data changes.
     The server never closes the connection — disconnect from the client side when done.
@@ -1004,6 +1083,11 @@ async def websocket_endpoint(websocket: WebSocket, chat_id: int):
     - `movie_renamed` — data: `{id, old_title, new_title}`
     - `basket_updated` — data: `{}` (refetch `/basket`)
     """
+    if _redis_client:
+        session_data = await _redis_client.get(f"session:{session_token}")
+        if not session_data:
+            await websocket.close(code=4001)
+            return
     await manager.connect(chat_id, websocket)
     try:
         while True:
