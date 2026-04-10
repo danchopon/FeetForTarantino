@@ -1,9 +1,10 @@
 """Basic bot commands: /start, /help, /add, /list, /pages, /wlist, /info, /random + their callbacks."""
 
 import random
-from urllib.parse import quote
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+
+from bot.auth import create_otp
 from telegram.ext import ContextTypes
 
 from bot.db import (
@@ -517,24 +518,23 @@ async def random_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def app_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send a deep link to open the watchlist in the iOS app."""
+    """Send a deep link with a single-use OTP to open the watchlist in the iOS app."""
     chat = update.effective_chat
-    chat_id = chat.id
-
-    if chat.title:
-        chat_name = chat.title
-    else:
-        chat_name = update.effective_user.first_name
-
     user = update.effective_user
-    encoded_name = quote(chat_name)
-    encoded_user_name = quote(user.first_name)
-    deep_link = (
-        f"https://danchopon.github.io/feetfortarantino/chat"
-        f"?id={chat_id}&name={encoded_name}"
-        f"&user_id={user.id}&user_name={encoded_user_name}"
+    chat_name = chat.title or user.first_name
+
+    token = create_otp(
+        chat_id=chat.id,
+        user_id=user.id,
+        user_name=user.first_name,
+        chat_name=chat_name,
     )
 
+    if token is None:
+        await update.message.reply_text("Сервис временно недоступен. Попробуйте позже.")
+        return
+
+    deep_link = f"https://danchopon.github.io/feetfortarantino/auth?token={token}"
     keyboard = [[InlineKeyboardButton("📱 Открыть в приложении", url=deep_link)]]
     await update.message.reply_text(
         "Нажми кнопку чтобы открыть список в приложении:",
