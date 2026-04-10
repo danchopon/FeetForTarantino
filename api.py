@@ -9,13 +9,15 @@ Docs available at:
 """
 
 import asyncio
+import json
 import os
 import random as _random
+import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
 from typing import Optional, List
 
 import httpx
+import redis.asyncio as aioredis
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,8 +27,26 @@ from telegram import Bot
 
 load_dotenv()
 
-# (chat_id, user_id) → last heartbeat UTC time (in-memory, resets on restart)
-_presence: dict[tuple[int, int], datetime] = {}
+_redis_client: aioredis.Redis | None = None
+
+
+async def _redis_listener() -> None:
+    """Subscribe to all chat_events:* channels and forward to WebSocket clients."""
+    while True:
+        try:
+            pubsub = _redis_client.pubsub()
+            await pubsub.psubscribe("chat_events:*")
+            async for message in pubsub.listen():
+                if message["type"] == "pmessage":
+                    try:
+                        event = json.loads(message["data"])
+                        await manager.broadcast(event["chat_id"], event)
+                    except Exception:
+                        pass
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            await asyncio.sleep(2)
 
 
 class ConnectionManager:
@@ -75,7 +95,15 @@ from bot.groq_ai import get_rec_suggestions
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _redis_client
     init_db()
+
+    listener_task = None
+    redis_url = os.environ.get("REDIS_URL")
+    if redis_url:
+        _redis_client = aioredis.from_url(redis_url, decode_responses=True)
+        listener_task = asyncio.create_task(_redis_listener())
+
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if token:
         bot = Bot(token=token)
@@ -85,7 +113,13 @@ async def lifespan(app: FastAPI):
     else:
         app.state.bot = None
         app.state.bot_token = None
+
     yield
+
+    if listener_task:
+        listener_task.cancel()
+    if _redis_client:
+        await _redis_client.aclose()
     if app.state.bot:
         await app.state.bot.shutdown()
 
@@ -375,7 +409,6 @@ async def add_movie(body: AddMovieRequest):
             status_code=409,
             detail=f"Movie already exists with status '{status}'",
         )
-    await manager.broadcast(body.chat_id, {"event": "movie_added", "chat_id": body.chat_id, "data": {"title": body.title}})
     return {"status": "added", "title": body.title}
 
 
@@ -395,7 +428,6 @@ async def mark_watched(
     success, title = mark_watched_by_id(chat_id, movie_id, body.watched_by)
     if not success:
         raise HTTPException(status_code=400, detail="Movie not found or already watched")
-    await manager.broadcast(chat_id, {"event": "movie_watched", "chat_id": chat_id, "data": {"id": movie_id, "title": title}})
     return {"status": "watched", "title": title}
 
 
@@ -414,7 +446,6 @@ async def unwatch(
     success, title = unwatch_movie_by_id(chat_id, movie_id)
     if not success:
         raise HTTPException(status_code=400, detail="Movie not found or not in watched list")
-    await manager.broadcast(chat_id, {"event": "movie_unwatched", "chat_id": chat_id, "data": {"id": movie_id, "title": title}})
     return {"status": "to_watch", "title": title}
 
 
@@ -434,7 +465,6 @@ async def rename_movie(
     success, old_title = rename_movie_by_id(chat_id, movie_id, body.new_title)
     if not success:
         raise HTTPException(status_code=400, detail="Movie not found or title already exists")
-    await manager.broadcast(chat_id, {"event": "movie_renamed", "chat_id": chat_id, "data": {"id": movie_id, "old_title": old_title, "new_title": body.new_title}})
     return {"old_title": old_title, "new_title": body.new_title}
 
 
@@ -453,7 +483,6 @@ async def remove_movie(
     title = remove_movie_by_id(chat_id, movie_id)
     if not title:
         raise HTTPException(status_code=404, detail="Movie not found")
-    await manager.broadcast(chat_id, {"event": "movie_removed", "chat_id": chat_id, "data": {"id": movie_id, "title": title}})
     return {"status": "removed", "title": title}
 
 
@@ -653,8 +682,6 @@ async def basket_add(body: BasketAddRequest):
         )
 
     added, already = add_to_basket(body.chat_id, body.user_id, body.user_name, valid)
-    if added:
-        await manager.broadcast(body.chat_id, {"event": "basket_updated", "chat_id": body.chat_id, "data": {}})
     return {"added": added, "already_in_basket": already}
 
 
@@ -676,8 +703,6 @@ async def basket_remove(
     - Omit `movie_nums` (or pass `null`) to clear all entries for that user.
     """
     count = remove_from_basket(chat_id, user_id, body.movie_nums)
-    if count:
-        await manager.broadcast(chat_id, {"event": "basket_updated", "chat_id": chat_id, "data": {}})
     return {"status": "removed", "title": f"{count} entries"}
 
 
@@ -692,8 +717,6 @@ async def basket_clear_all(
 ):
     """Removes all basket entries for the chat (equivalent to bot `/vc`)."""
     count = clear_basket(chat_id)
-    if count:
-        await manager.broadcast(chat_id, {"event": "basket_updated", "chat_id": chat_id, "data": {}})
     return {"status": "cleared", "title": f"{count} entries"}
 
 
@@ -929,9 +952,13 @@ class PresenceResponse(BaseModel):
 async def heartbeat(body: HeartbeatRequest):
     """
     Call every ~30 seconds while the app is in the foreground to mark the user as online.
-    Presence data is in-memory only and resets when the server restarts.
+    Presence is stored in Redis with a sliding 90-second window.
     """
-    _presence[(body.chat_id, body.user_id)] = datetime.utcnow()
+    if _redis_client:
+        await _redis_client.zadd(
+            f"presence:{body.chat_id}",
+            {str(body.user_id): time.time()},
+        )
     return {"status": "ok"}
 
 
@@ -947,9 +974,11 @@ async def get_presence(
     """
     Returns user IDs that sent a heartbeat within the last 90 seconds for this chat.
     """
-    threshold = datetime.utcnow() - timedelta(seconds=90)
-    online = [uid for (cid, uid), t in _presence.items() if cid == chat_id and t > threshold]
-    return PresenceResponse(online_user_ids=online)
+    if not _redis_client:
+        return PresenceResponse(online_user_ids=[])
+    threshold = time.time() - 90
+    members = await _redis_client.zrangebyscore(f"presence:{chat_id}", threshold, "+inf")
+    return PresenceResponse(online_user_ids=[int(uid) for uid in members])
 
 
 # ── realtime ──────────────────────────────────────────────────────────────────

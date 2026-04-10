@@ -4,6 +4,8 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import datetime
 
+from bot.events import publish_event
+
 logger = logging.getLogger(__name__)
 
 
@@ -108,6 +110,7 @@ def add_movie_db(chat_id: int, title: str, added_by: str,
              overview, runtime, director)
         )
         conn.commit()
+        publish_event(chat_id, "movie_added", {"title": title})
         return True, "added"
     except psycopg2.errors.UniqueViolation:
         conn.rollback()
@@ -156,6 +159,7 @@ def mark_watched_by_id(chat_id: int, movie_id: int, watched_by: str) -> tuple[bo
     conn.commit()
     cur.close()
     conn.close()
+    publish_event(chat_id, "movie_watched", {"id": movie_id, "title": row["title"]})
     return True, row["title"]
 
 
@@ -184,6 +188,7 @@ def unwatch_movie_by_id(chat_id: int, movie_id: int) -> tuple[bool, str | None]:
     conn.commit()
     cur.close()
     conn.close()
+    publish_event(chat_id, "movie_unwatched", {"id": movie_id, "title": row["title"]})
     return True, row["title"]
 
 
@@ -229,6 +234,7 @@ def rename_movie_by_id(chat_id: int, movie_id: int, new_title: str) -> tuple[boo
         conn.commit()
         cur.close()
         conn.close()
+        publish_event(chat_id, "movie_renamed", {"id": movie_id, "old_title": old_title, "new_title": new_title})
         return True, old_title
     except psycopg2.errors.UniqueViolation:
         conn.rollback()
@@ -253,6 +259,7 @@ def remove_movie_by_id(chat_id: int, movie_id: int) -> str | None:
     conn.commit()
     cur.close()
     conn.close()
+    publish_event(chat_id, "movie_removed", {"id": movie_id, "title": row["title"]})
     return row["title"]
 
 
@@ -290,6 +297,7 @@ def mark_watched_db(chat_id: int, search: str, watched_by: str) -> tuple[bool, s
     conn.commit()
     cur.close()
     conn.close()
+    publish_event(chat_id, "movie_watched", {"id": row["id"], "title": row["title"]})
     return True, row["title"]
 
 
@@ -313,6 +321,7 @@ def remove_movie_db(chat_id: int, search: str) -> str | None:
     conn.commit()
     cur.close()
     conn.close()
+    publish_event(chat_id, "movie_removed", {"id": row["id"], "title": row["title"]})
     return row["title"]
 
 
@@ -407,6 +416,8 @@ def add_to_basket(chat_id: int, user_id: int, user_name: str, movie_nums: list[i
 
     cur.close()
     conn.close()
+    if added:
+        publish_event(chat_id, "basket_updated", {})
     return added, exists
 
 
@@ -423,6 +434,8 @@ def remove_from_basket(chat_id: int, user_id: int, movie_nums: list[int] | None 
     conn.commit()
     cur.close()
     conn.close()
+    if count:
+        publish_event(chat_id, "basket_updated", {})
     return count
 
 
@@ -434,6 +447,8 @@ def clear_basket(chat_id: int) -> int:
     conn.commit()
     cur.close()
     conn.close()
+    if count:
+        publish_event(chat_id, "basket_updated", {})
     return count
 
 
