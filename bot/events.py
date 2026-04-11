@@ -7,9 +7,12 @@ and Redis — no direct IPC.
 """
 
 import json
+import logging
 import os
 
 import redis
+
+logger = logging.getLogger(__name__)
 
 _client: redis.Redis | None = None
 
@@ -32,4 +35,4 @@ def publish_event(chat_id: int, event: str, data: dict) -> None:
         payload = json.dumps({"event": event, "chat_id": chat_id, "data": data})
         client.publish(f"chat_events:{chat_id}", payload)
     except Exception:
-        pass
+        logger.warning("Failed to publish event %s to chat %s", event, chat_id, exc_info=True)

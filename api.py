@@ -34,8 +34,8 @@ _redis_client: aioredis.Redis | None = None
 async def _redis_listener() -> None:
     """Subscribe to all chat_events:* channels and forward to WebSocket clients."""
     while True:
+        pubsub = _redis_client.pubsub()
         try:
-            pubsub = _redis_client.pubsub()
             await pubsub.psubscribe("chat_events:*")
             async for message in pubsub.listen():
                 if message["type"] == "pmessage":
@@ -45,8 +45,10 @@ async def _redis_listener() -> None:
                     except Exception:
                         pass
         except asyncio.CancelledError:
+            await pubsub.aclose()
             return
         except Exception:
+            await pubsub.aclose()
             await asyncio.sleep(2)
 
 
@@ -166,6 +168,20 @@ async def verify_session(request: Request, call_next):
     request.state.user_name = session["user_name"]
     request.state.chat_id = session["chat_id"]
     request.state.chat_name = session["chat_name"]
+    # Enforce chat_id / user_id query params match session
+    qp = request.query_params
+    if "chat_id" in qp:
+        try:
+            if int(qp["chat_id"]) != session["chat_id"]:
+                return JSONResponse(status_code=403, content={"detail": "Access denied to this chat"})
+        except ValueError:
+            pass
+    if "user_id" in qp:
+        try:
+            if int(qp["user_id"]) != session["user_id"]:
+                return JSONResponse(status_code=403, content={"detail": "Cannot act as another user"})
+        except ValueError:
+            pass
     return await call_next(request)
 
 
@@ -373,6 +389,14 @@ class ChatMemberResponse(BaseModel):
     )
 
 
+def _check_body_access(request: Request, chat_id: int, user_id: int | None = None):
+    """Raise 403 if body chat_id/user_id doesn't match the authenticated session."""
+    if hasattr(request.state, "chat_id") and chat_id != request.state.chat_id:
+        raise HTTPException(status_code=403, detail="Access denied to this chat")
+    if user_id is not None and hasattr(request.state, "user_id") and user_id != request.state.user_id:
+        raise HTTPException(status_code=403, detail="Cannot act as another user")
+
+
 # ── internal helpers ─────────────────────────────────────────────────────────
 
 async def _has_profile_photo(bot: Bot, user_id: int) -> bool:
@@ -442,7 +466,7 @@ async def get_movie(
     responses={409: {"description": "Movie already exists in watchlist or watched"}},
     tags=["Movies"],
 )
-async def add_movie(body: AddMovieRequest):
+async def add_movie(body: AddMovieRequest, request: Request):
     """
     Add a movie to the watchlist.
 
@@ -454,6 +478,7 @@ async def add_movie(body: AddMovieRequest):
 
     Returns **409** if the movie title already exists for this chat.
     """
+    _check_body_access(request, body.chat_id)
     overview = body.overview
     runtime = body.runtime
     director = body.director
@@ -741,13 +766,14 @@ async def get_my_basket(
     response_model=BasketAddResponse,
     tags=["Basket"],
 )
-async def basket_add(body: BasketAddRequest):
+async def basket_add(body: BasketAddRequest, request: Request):
     """
     Add one or more to_watch positions to a user's basket.
 
     `movie_nums` are 1-based positions in the chat's current to_watch list.
     Positions already in the basket are reported in `already_in_basket` and not duplicated.
     """
+    _check_body_access(request, body.chat_id, body.user_id)
     to_watch = get_movies_db(body.chat_id, "to_watch")
     valid = [n for n in body.movie_nums if 1 <= n <= len(to_watch)]
     invalid = [n for n in body.movie_nums if n not in valid]
@@ -1026,11 +1052,12 @@ class PresenceResponse(BaseModel):
     response_model=dict,
     tags=["Presence"],
 )
-async def heartbeat(body: HeartbeatRequest):
+async def heartbeat(body: HeartbeatRequest, request: Request):
     """
     Call every ~30 seconds while the app is in the foreground to mark the user as online.
     Presence is stored in Redis with a sliding 90-second window.
     """
+    _check_body_access(request, body.chat_id, body.user_id)
     if _redis_client:
         await _redis_client.zadd(
             f"presence:{body.chat_id}",
@@ -1086,6 +1113,9 @@ async def websocket_endpoint(websocket: WebSocket, chat_id: int, session_token: 
     if _redis_client:
         session_data = await _redis_client.get(f"session:{session_token}")
         if not session_data:
+            await websocket.close(code=4001)
+            return
+        if json.loads(session_data)["chat_id"] != chat_id:
             await websocket.close(code=4001)
             return
     await manager.connect(chat_id, websocket)
