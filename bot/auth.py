@@ -6,10 +6,13 @@ in Redis for 5 minutes and deleted on first use by POST /auth/exchange.
 """
 
 import json
+import logging
 import os
 import secrets
 
 import redis
+
+logger = logging.getLogger(__name__)
 
 _client: redis.Redis | None = None
 _OTP_TTL = 300  # 5 minutes
@@ -39,5 +42,9 @@ def create_otp(chat_id: int, user_id: int, user_name: str, chat_name: str) -> st
         "user_name": user_name,
         "chat_name": chat_name,
     })
-    client.setex(f"otp:{token}", _OTP_TTL, payload)
+    try:
+        client.setex(f"otp:{token}", _OTP_TTL, payload)
+    except Exception:
+        logger.warning("Failed to store OTP in Redis", exc_info=True)
+        return None
     return token
